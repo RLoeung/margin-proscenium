@@ -38,4 +38,4 @@ Before an installer or bundled Release: inventory exact binaries, native data an
 
 ## Publication status
 
-Ready for a public source repository on the reviewed boundary. No GitHub repository, remote, push or release has been created. Clean installation and listening validation remain future development/distribution work; README makes no claim that they are complete.
+The reviewed source repository has been published publicly on GitHub. No packaged release or installer has been created. Clean installation and listening validation remain future development/distribution work; README makes no claim that they are complete.
