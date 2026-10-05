@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Isabella Local Reader",
+  "version": "0.2.0",
+  "description": "Reads selected webpage text through the local Kokoro TTS server.",
+  "permissions": [
+    "contextMenus",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:5150/*",
+    "http://localhost:5150/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

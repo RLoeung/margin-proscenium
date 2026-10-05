@@ -1,0 +1,9 @@
+# Normalize new foundation documents and dependency inventory.
+*.md text eol=lf
+requirements-environment.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+# Preserve historical source/release/launcher bytes without line-ending conversion.
+scripts/** -text whitespace=cr-at-eol
+extension/** -text whitespace=cr-at-eol
+launchers/** -text whitespace=cr-at-eol
