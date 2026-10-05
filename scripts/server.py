@@ -1,4 +1,4 @@
-from collections import defaultdict, deque
+from collections import defaultdict
 from io import BytesIO
 import json
 import re
@@ -11,8 +11,13 @@ from fastapi.responses import Response
 from kokoro import KPipeline
 from pydantic import BaseModel, Field
 
+if __package__:
+    from .literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision
+else:
+    from literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision
 
-app = FastAPI(title="Local Kokoro Narration Server", version="0.15.0")
+
+app = FastAPI(title="Local Kokoro Narration Server", version="0.16.0-dev")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,33 +45,7 @@ BASE_TRAILING_PAUSE_MS = {
     "question": 290, "exclamation": 290, "ellipsis": 420, "other": 180,
 }
 
-CONTEXT_LENGTH = 16
-CONTEXTS = defaultdict(lambda: deque(maxlen=CONTEXT_LENGTH))
-DIALOGUE_STATE = defaultdict(lambda: {"quote_open": False})
-
-
-def new_cast_state():
-    return {
-        "voices": {},
-        "gender": {},
-        # An unknown-gender assignment is provisional. A reliable she/he binding
-        # may replace it once; all gendered assignments are immediately locked.
-        "voice_status": {},
-        "recast_used": {},
-        "recent_entities": deque(maxlen=8),
-        "pronouns": {"she": None, "he": None},
-        "active_dialogue_speaker": None,
-        "last_speaker": None,
-        "previous_speaker": None,
-        "participants": deque(maxlen=4),
-        "likely_next_speaker": None,
-        "female_index": 0,
-        "male_index": 0,
-        "unknown_index": 0,
-    }
-
-
-CAST_STATE = defaultdict(new_cast_state)
+LITERARY_STATES = defaultdict(LiteraryState)
 
 ATTRIBUTION_VERBS = (
     "say", "says", "said", "ask", "asks", "asked", "answer", "answers", "answered",
@@ -204,45 +183,45 @@ def segment_text(text: str) -> list[str]:
 
 
 def update_quote_state(client_id: str, text: str) -> dict:
-    state = DIALOGUE_STATE[client_id]
-    was_open = state["quote_open"]
+    state = LITERARY_STATES[client_id].scene
+    was_open = state.quote_open
     opens, closes, straight = text.count("“"), text.count("”"), text.count('"')
     stripped = text.strip()
     if opens or closes:
         if was_open:
             if opens > 0 and closes < opens:
-                dialogue, state["quote_open"], transition = True, True, "dialogue_reopen"
+                dialogue, state.quote_open, transition = True, True, "dialogue_reopen"
             elif closes > opens or (stripped.endswith("”") and closes):
-                dialogue, state["quote_open"], transition = True, False, "dialogue_close"
+                dialogue, state.quote_open, transition = True, False, "dialogue_close"
             else:
-                dialogue, state["quote_open"], transition = True, True, "dialogue_continuation"
+                dialogue, state.quote_open, transition = True, True, "dialogue_continuation"
         elif opens:
             dialogue = True
-            state["quote_open"] = closes < opens
-            if state["quote_open"]:
+            state.quote_open = closes < opens
+            if state.quote_open:
                 transition = "dialogue_open"
             else:
                 transition = "dialogue_with_attribution" if has_structural_attribution(text, was_open) else "dialogue_complete"
         else:
-            dialogue, state["quote_open"] = True, False
+            dialogue, state.quote_open = True, False
             transition = "orphan_dialogue_with_attribution" if has_structural_attribution(text, was_open) else "orphan_dialogue_close"
     elif straight:
         dialogue = True
         if was_open:
-            state["quote_open"] = straight % 2 == 0
-            transition = "dialogue_continuation" if state["quote_open"] else "dialogue_close"
+            state.quote_open = straight % 2 == 0
+            transition = "dialogue_continuation" if state.quote_open else "dialogue_close"
         else:
-            state["quote_open"] = straight % 2 == 1
-            transition = "dialogue_open" if state["quote_open"] else (
+            state.quote_open = straight % 2 == 1
+            transition = "dialogue_open" if state.quote_open else (
                 "dialogue_with_attribution" if has_structural_attribution(text, was_open) else "dialogue_complete"
             )
     elif was_open:
         dialogue, transition = True, "dialogue_continuation"
     else:
-        dialogue, state["quote_open"], transition = False, False, "outside_dialogue"
+        dialogue, state.quote_open, transition = False, False, "outside_dialogue"
     return {
         "was_open": was_open, "is_dialogue": dialogue, "quote_transition": transition,
-        "quote_open_after": state["quote_open"], "curly_open_count": opens,
+        "quote_open_after": state.quote_open, "curly_open_count": opens,
         "curly_close_count": closes, "straight_count": straight,
     }
 
@@ -289,7 +268,7 @@ def classify_utterance(client_id: str, text: str) -> dict:
 def remember_entity(client_id: str, name: str):
     if not valid_name_candidate(name):
         return
-    entities = CAST_STATE[client_id]["recent_entities"]
+    entities = LITERARY_STATES[client_id].scene.recent_entities
     try:
         entities.remove(name)
     except ValueError:
@@ -298,13 +277,13 @@ def remember_entity(client_id: str, name: str):
 
 
 def most_recent_entity(client_id: str, gender=None):
-    state = CAST_STATE[client_id]
-    for name in reversed(state["recent_entities"]):
-        if gender is None or state["gender"].get(name) == gender:
+    state = LITERARY_STATES[client_id].scene
+    for name in reversed(state.recent_entities):
+        if gender is None or state.gender.get(name) == gender:
             return name
     if gender:
-        for name in reversed(state["recent_entities"]):
-            if state["gender"].get(name) is None:
+        for name in reversed(state.recent_entities):
+            if state.gender.get(name) is None:
                 return name
     return None
 
@@ -326,72 +305,66 @@ def choose_pool_voice(state, gender, narrator_voice):
         pool, key = MALE_VOICE_POOL, "male_index"
     else:
         pool, key = UNKNOWN_VOICE_POOL, "unknown_index"
-    voice, state[key] = next_available_voice(pool, narrator_voice, state[key])
+    voice, next_index = next_available_voice(pool, narrator_voice, getattr(state, key))
+    setattr(state, key, next_index)
     return voice
 
 
 def refine_gender(client_id: str, speaker: str, gender: str):
-    """Apply a reliable pronoun binding and permit exactly one provisional recast."""
-    if speaker.startswith("__"):
-        CAST_STATE[client_id]["gender"][speaker] = gender
+    """Apply a pronoun binding and permit exactly one provisional recast."""
+    if not speaker:
         return
-    state = CAST_STATE[client_id]
-    old_gender = state["gender"].get(speaker)
-    if old_gender is None:
-        state["gender"][speaker] = gender
-        if speaker in state["voices"] and state["voice_status"].get(speaker) == "provisional" and not state["recast_used"].get(speaker, False):
-            state["voices"].pop(speaker, None)
-            state["recast_used"][speaker] = True
-            state["voice_status"][speaker] = "pending_recast"
-    # Once a reliable gender has been learned, conflicting later guesses cannot
-    # oscillate either gender or voice.
+    state = LITERARY_STATES[client_id].scene
+    performance = LITERARY_STATES[client_id].performance
+    if state.gender.get(speaker) is None:
+        state.gender[speaker] = gender
+        if speaker in performance.voices and performance.voice_status.get(speaker) == "provisional" and not performance.recast_used.get(speaker, False):
+            performance.voices.pop(speaker, None)
+            performance.recast_used[speaker] = True
+            performance.voice_status[speaker] = "pending_recast"
+    # Later contradictory guesses cannot oscillate gender or voice.
 
 
 def bind_pronoun(client_id: str, reference: str):
-    state = CAST_STATE[client_id]
+    state = LITERARY_STATES[client_id].scene
     ref = reference.lower()
     if ref == "i":
-        return "__narrator__", None
-    if ref in ("she", "her"):
-        cached = state["pronouns"]["she"]
-        if cached and state["gender"].get(cached) not in (None, "female"):
+        return LITERARY_STATES[client_id].pov_identity(), None
+    if ref in ("she", "her", "he", "him"):
+        slot, gender = ("she", "female") if ref in ("she", "her") else ("he", "male")
+        cached = state.pronouns[slot]
+        if cached and state.gender.get(cached) not in (None, gender):
             cached = None
-        speaker = cached or most_recent_entity(client_id, "female") or "__she__"
-        state["pronouns"]["she"] = speaker
-        refine_gender(client_id, speaker, "female")
-        return speaker, "female"
-    if ref in ("he", "him"):
-        cached = state["pronouns"]["he"]
-        if cached and state["gender"].get(cached) not in (None, "male"):
-            cached = None
-        speaker = cached or most_recent_entity(client_id, "male") or "__he__"
-        state["pronouns"]["he"] = speaker
-        refine_gender(client_id, speaker, "male")
-        return speaker, "male"
+        speaker = cached or most_recent_entity(client_id, gender)
+        state.pronouns[slot] = speaker
+        refine_gender(client_id, speaker, gender)
+        return speaker, gender
     return None, None
 
 
-def assign_cast_voice(client_id: str, speaker: str, gender, narrator_voice: str):
-    if speaker == "__narrator__":
+def assign_cast_voice(client_id: str, speaker: str | None, gender, narrator_voice: str):
+    # Fallback is performance only: never allocate a cast identity or voice for it.
+    if speaker is None:
         return narrator_voice
-    state = CAST_STATE[client_id]
-    if speaker in state["voices"]:
-        return state["voices"][speaker]
-    known_gender = state["gender"].get(speaker) or gender
+    literary = LITERARY_STATES[client_id]
+    state = literary.performance
+    if speaker in state.voices:
+        return state.voices[speaker]
+    known_gender = literary.scene.gender.get(speaker) or gender
     voice = choose_pool_voice(state, known_gender, narrator_voice)
-    state["voices"][speaker] = voice
+    state.voices[speaker] = voice
     if known_gender:
-        state["gender"][speaker] = known_gender
-        state["voice_status"][speaker] = "locked"
+        literary.scene.gender[speaker] = known_gender
+        state.voice_status[speaker] = "locked"
     else:
-        state["voice_status"][speaker] = "provisional"
-        state["recast_used"].setdefault(speaker, False)
+        state.voice_status[speaker] = "provisional"
+        state.recast_used.setdefault(speaker, False)
     return voice
 
 
 def observe_narrative_actor(client_id: str, text: str):
     """Return a named/pronominal actor for a narration/action sentence."""
-    state = CAST_STATE[client_id]
+    state = LITERARY_STATES[client_id].scene
     match = LEADING_NAME_PATTERN.search(text)
     if match and valid_name_candidate(match.group(1)):
         actor = match.group(1)
@@ -399,10 +372,10 @@ def observe_narrative_actor(client_id: str, text: str):
         # Possessive pronouns in a named actor sentence are reliable trait clues.
         if re.search(r"\bher\b", text, re.I):
             refine_gender(client_id, actor, "female")
-            state["pronouns"]["she"] = actor
+            state.pronouns["she"] = actor
         elif re.search(r"\bhis\b", text, re.I):
             refine_gender(client_id, actor, "male")
-            state["pronouns"]["he"] = actor
+            state.pronouns["he"] = actor
         return actor
     match = LEADING_PRONOUN_PATTERN.search(text)
     if match and match.group(1).lower() in ("she", "he"):
@@ -410,127 +383,141 @@ def observe_narrative_actor(client_id: str, text: str):
     return None
 
 
-def add_participant(state, speaker):
-    if not speaker or speaker.startswith("__") and speaker != "__narrator__":
+def record_dialogue_speaker(state, decision):
+    """Only established attribution may add confirmed conversation participants."""
+    if decision.status != "resolved":
+        # An unknown/tentative intervening turn breaks known turn ordering.
+        state.previous_speaker = state.last_speaker
+        state.last_speaker = None
         return
+    speaker = decision.speaker
+    if speaker != state.last_speaker:
+        state.previous_speaker = state.last_speaker
+        state.last_speaker = speaker
     try:
-        state["participants"].remove(speaker)
+        state.participants.remove(speaker)
     except ValueError:
         pass
-    state["participants"].append(speaker)
+    state.participants.append(speaker)
 
 
-def record_dialogue_speaker(state, speaker):
-    if not speaker:
-        return
-    if speaker != state["last_speaker"]:
-        state["previous_speaker"] = state["last_speaker"]
-        state["last_speaker"] = speaker
-    add_participant(state, speaker)
-
-
-def previous_dialogue_entry(client_id: str):
-    for item in reversed(CONTEXTS[client_id]):
-        if item.get("is_dialogue"):
-            return item
-    return None
+def attribution_decision(client_id, text, classification):
+    literary = LITERARY_STATES[client_id]
+    name, reference = classification.get("speaker_name"), classification.get("speaker_reference")
+    if name:
+        remember_entity(client_id, name)
+        speaker, status, kind = name, "resolved", "explicit-name"
+    elif reference:
+        speaker, _ = bind_pronoun(client_id, reference)
+        # Third-person reference binding still uses recency heuristics.
+        status = "resolved" if reference.lower() == "i" else ("tentative" if speaker else "unresolved")
+        kind = "explicit-reference"
+    else:
+        return None
+    evidence = Evidence(kind=kind, scope_id=literary.scope_id, position=literary.position,
+                        text=text, candidate=speaker,
+                        strength="definitive" if status == "resolved" else "suggestive")
+    return SpeakerDecision(status=status, speaker=speaker, reason=kind,
+                           confidence="high" if status == "resolved" else "low", evidence=(evidence,))
 
 
 def infer_speaker(client_id: str, text: str, classification: dict):
-    state = CAST_STATE[client_id]
-    kind = classification["type"]
-    is_dialogue = classification["is_dialogue"]
-    name = classification.get("speaker_name")
-    reference = classification.get("speaker_reference")
+    literary = LITERARY_STATES[client_id]
+    state = literary.scene
+    if not classification["is_dialogue"]:
+        return SpeakerDecision(status="narration", reason="narration", confidence="high")
 
-    if name:
-        remember_entity(client_id, name)
-        speaker, gender, reason, confidence = name, state["gender"].get(name), (
-            "explicit-name" if is_dialogue else "narration-attribution"
-        ), "high"
-    elif reference:
-        speaker, gender = bind_pronoun(client_id, reference)
-        reason, confidence = (
-            "explicit-reference" if is_dialogue else "narration-attribution"
-        ), "high"
-    elif is_dialogue and classification.get("was_open") and state["active_dialogue_speaker"]:
-        speaker, gender, reason, confidence = state["active_dialogue_speaker"], None, "quote-span-continuation", "high"
-    elif is_dialogue and state["likely_next_speaker"]:
-        speaker = state["likely_next_speaker"]
-        state["likely_next_speaker"] = None
-        gender, reason, confidence = state["gender"].get(speaker), "narrative-action-cue", "medium"
-    elif is_dialogue:
-        participants = list(state["participants"])
-        if len(participants) == 2 and state["last_speaker"] in participants:
-            speaker = next(p for p in participants if p != state["last_speaker"])
-            gender, reason, confidence = state["gender"].get(speaker), "two-person-alternation", "medium"
-        elif len(participants) == 1 and participants[0] != state["last_speaker"]:
-            speaker = participants[0]
-            gender, reason, confidence = state["gender"].get(speaker), "known-participant", "low"
-        else:
-            speaker, gender, reason, confidence = "__narrator__", None, "conservative-dialogue-fallback", "low"
-    else:
-        speaker, gender, reason, confidence = "__narrator__", None, "narration", "high"
-
-    if is_dialogue:
-        # An explicit speaker overrides (and therefore invalidates) any pending
-        # action prediction instead of leaving it to leak into the next turn.
-        if name or reference:
-            state["likely_next_speaker"] = None
-        if classification["quote_open_after"]:
-            state["active_dialogue_speaker"] = speaker
-        else:
-            state["active_dialogue_speaker"] = None
-        record_dialogue_speaker(state, speaker)
-    return speaker, gender, reason, confidence
+    decision = attribution_decision(client_id, text, classification)
+    if decision is None and classification.get("was_open") and state.active_decision is not None:
+        active = state.active_decision
+        evidence = Evidence(kind="quote-span-continuation", scope_id=literary.scope_id,
+                            position=literary.position, text=text, candidate=active.speaker,
+                            strength="definitive" if active.status == "resolved" else "suggestive")
+        decision = SpeakerDecision(status=active.status, speaker=active.speaker,
+                                   reason="quote-span-continuation", confidence=active.confidence,
+                                   evidence=(*active.evidence[:3], evidence))
+    if decision is None:
+        evidence = []
+        prior = literary.context[-1] if literary.context else None
+        if (prior and prior.position == literary.position - 1 and prior.narrative_actor
+                and not prior.classification.has_attribution):
+            evidence.append(Evidence(kind="preceding-action", scope_id=literary.scope_id,
+                                     position=prior.position, text=prior.text,
+                                     candidate=prior.narrative_actor, strength="suggestive"))
+        # Preserve alternation as inspectable evidence, never as a forced identity.
+        if len(state.participants) == 2 and state.last_speaker in state.participants:
+            candidate = next(p for p in state.participants if p != state.last_speaker)
+            evidence.append(Evidence(kind="two-person-alternation", scope_id=literary.scope_id,
+                                     position=literary.position, text=text,
+                                     candidate=candidate, strength="suggestive"))
+        decision = SpeakerDecision(status="unresolved", reason="conservative-dialogue-fallback",
+                                   confidence="low", evidence=tuple(evidence))
+    state.active_decision = decision if classification["quote_open_after"] else None
+    record_dialogue_speaker(state, decision)
+    return decision
 
 
-def update_scene_after_narration(client_id: str, text: str, classification: dict, actor):
-    state = CAST_STATE[client_id]
-    if classification["is_dialogue"]:
-        return None
-    prior = previous_dialogue_entry(client_id)
-    previous_speaker = prior.get("cast_speaker") if prior else state["last_speaker"]
+def is_explicit_detached_speech_tag(entry: ContextEntry):
+    """Conservative confirmation gate; leave the general attribution parser intact.
 
-    # Backward attribution learns who delivered the immediately preceding line.
-    if classification["type"] == "possible_attribution" and (
-        classification.get("speaker_reference") or classification.get("speaker_name")
-    ):
-        if classification.get("speaker_name"):
-            attributed = classification["speaker_name"]
-            remember_entity(client_id, attributed)
-        else:
-            attributed, _ = bind_pronoun(client_id, classification["speaker_reference"])
-        if prior and attributed:
-            prior["cast_speaker"] = attributed
-            record_dialogue_speaker(state, attributed)
-        # This explicit attribution supersedes any older next-speaker cue.
-        state["likely_next_speaker"] = None
-        return "narration-attribution"
+    Only bare subject/verb speech tags qualify. Complements, negation, thought
+    verbs, and other prose remain observations even when the parser finds a hint.
+    """
+    subject = entry.classification.speaker_name or entry.classification.speaker_reference
+    if not subject:
+        return False
+    subject = re.escape(subject)
+    verb = r"(?:say|says|said|ask|asks|asked|reply|replies|replied|answer|answers|answered|whisper|whispers|whispered|shout|shouts|shouted|murmur|murmurs|murmured|exclaim|exclaims|exclaimed|respond|responds|responded|retort|retorts|retorted)"
+    return bool(re.fullmatch(
+        rf"\s*(?:{subject}\s+{verb}|{verb}\s+{subject})\s*[.!?]?\s*",
+        entry.text, re.I,
+    ))
 
-    if not actor:
-        return None
-    if (
-        prior
-        and prior.get("routing_reason") == "conservative-dialogue-fallback"
-        and previous_speaker in (None, "__narrator__")
-        and actor != previous_speaker
-    ):
-        # A following named action can retrospectively identify an otherwise
-        # unknown/fallback dialogue line.
-        prior["cast_speaker"] = actor
-        record_dialogue_speaker(state, actor)
-        previous_speaker = actor
 
-    if actor == previous_speaker:
-        # The beat confirms the preceding line without consuming its separate,
-        # forward-looking value for the immediately following dialogue.
-        state["likely_next_speaker"] = actor
-        return "action-confirms-previous"
-    else:
-        # A different actor remains a plausible cue for the following line.
-        state["likely_next_speaker"] = actor
-        return "narrative-action-cue"
+def update_scene_after_narration(client_id: str, entry: ContextEntry):
+    """Keep later evidence separate from the immutable decision used for rendering."""
+    literary = LITERARY_STATES[client_id]
+    classification = entry.classification
+    if classification.is_dialogue:
+        return
+    prior = literary.context[-2] if len(literary.context) >= 2 else None
+    if not (prior and prior.position == entry.position - 1 and prior.classification.is_dialogue):
+        return
+    if classification.type == "possible_attribution" and is_explicit_detached_speech_tag(entry):
+        if prior.decision.status in ("unresolved", "tentative"):
+            refinement = attribution_decision(client_id, entry.text, classification.model_dump())
+            prior.refinement = refinement
+            record_dialogue_speaker(literary.scene, refinement)
+        return
+    if entry.narrative_actor:
+        prior.following_evidence = (Evidence(
+            kind="following-action", scope_id=literary.scope_id, position=entry.position,
+            text=entry.text, candidate=entry.narrative_actor, strength="suggestive",
+        ),)
+
+
+def prepare_segment(client_id: str, text: str, narrator_voice: str):
+    """Shared routing path for HTTP and model-free regression tests."""
+    literary = LITERARY_STATES[client_id]
+    literary.position += 1
+    classification = classify_utterance(client_id, text)
+    actor = None if classification["is_dialogue"] else observe_narrative_actor(client_id, text)
+    decision = infer_speaker(client_id, text, classification)
+    gender = literary.scene.gender.get(decision.speaker)
+    voice = narrator_voice if not classification["is_dialogue"] else assign_cast_voice(
+        client_id, decision.speaker, gender, narrator_voice
+    )
+    return ContextEntry(
+        scope_id=literary.scope_id, position=literary.position, text=text,
+        classification=Classification(**classification), narrative_actor=actor,
+        decision=decision, selected_voice=voice, cast_gender=gender,
+        voice_status=literary.performance.voice_status.get(decision.speaker, "narrator"),
+    )
+
+
+def record_segment(client_id: str, entry: ContextEntry):
+    LITERARY_STATES[client_id].context.append(entry)
+    update_scene_after_narration(client_id, entry)
 
 
 def ending_type(text: str):
@@ -619,28 +606,33 @@ def health():
 @app.get("/cast")
 def cast(request: Request):
     client_id = request.client.host if request.client else "unknown"
-    state = CAST_STATE[client_id]
+    literary = LITERARY_STATES[client_id]
+    state = literary.scene
     return {
-        "client": client_id, "voices": dict(state["voices"]), "gender": dict(state["gender"]),
-        "voice_status": dict(state["voice_status"]), "recast_used": dict(state["recast_used"]),
-        "recent_entities": list(state["recent_entities"]), "pronouns": dict(state["pronouns"]),
-        "participants": list(state["participants"]), "last_speaker": state["last_speaker"],
-        "previous_speaker": state["previous_speaker"], "likely_next_speaker": state["likely_next_speaker"],
+        "client": client_id, **literary.performance.model_dump(mode="json"),
+        "gender": dict(state.gender), "recent_entities": list(state.recent_entities),
+        "pronouns": dict(state.pronouns), "participants": list(state.participants),
+        "last_speaker": state.last_speaker, "previous_speaker": state.previous_speaker,
+        # Retained for diagnostic compatibility; action cues no longer select speakers.
+        "likely_next_speaker": None,
+        "schema_version": literary.schema_version, "scope_id": literary.scope_id,
+        "pov_entity_id": state.pov_entity_id,
     }
 
 
 @app.get("/context")
 def context(request: Request):
     client_id = request.client.host if request.client else "unknown"
-    return {"client": client_id, "quote_open": DIALOGUE_STATE[client_id]["quote_open"], "utterances": list(CONTEXTS[client_id])}
+    literary = LITERARY_STATES[client_id]
+    return {"client": client_id, "quote_open": literary.scene.quote_open,
+            "schema_version": literary.schema_version, "scope_id": literary.scope_id,
+            "utterances": [entry.public_record() for entry in literary.context]}
 
 
 @app.post("/context/reset")
 def reset_context(request: Request):
     client_id = request.client.host if request.client else "unknown"
-    CONTEXTS.pop(client_id, None)
-    DIALOGUE_STATE.pop(client_id, None)
-    CAST_STATE.pop(client_id, None)
+    LITERARY_STATES.pop(client_id, None)
     return {"status": "reset", "client": client_id}
 
 
@@ -655,28 +647,13 @@ def audio_speech(payload: SpeechRequest, request: Request):
     rendered = []
     try:
         for index, text in enumerate(segments, 1):
-            classification = classify_utterance(client_id, text)
-            actor = None if classification["is_dialogue"] else observe_narrative_actor(client_id, text)
-            speaker, gender, reason, speaker_confidence = infer_speaker(client_id, text, classification)
-            # Attribution prose can carry character semantics and update cast
-            # memory, but it remains prose and must always use the narrator.
-            voice = payload.voice if not classification["is_dialogue"] else assign_cast_voice(
-                client_id, speaker, gender, payload.voice
-            )
-            audio = synthesize(text, voice, payload.speed)
-            audio, pacing = trim_and_pad(audio, text, classification)
+            entry = prepare_segment(client_id, text, payload.voice)
+            audio = synthesize(text, entry.selected_voice, payload.speed)
+            audio, pacing = trim_and_pad(audio, text, entry.classification.model_dump())
             rendered.append(audio)
-            entry = {
-                "text": text, **classification, "narrative_actor": actor, "cast_speaker": speaker,
-                "cast_gender": CAST_STATE[client_id]["gender"].get(speaker), "selected_voice": voice,
-                "routing_reason": reason, "speaker_confidence": speaker_confidence,
-                "voice_status": CAST_STATE[client_id]["voice_status"].get(speaker, "narrator"),
-            }
-            CONTEXTS[client_id].append(entry)
-            narrative_reason = update_scene_after_narration(client_id, text, classification, actor)
-            if narrative_reason:
-                entry["routing_reason"] = narrative_reason
-            print(json.dumps({"segment": f"{index}/{len(segments)}", "client": client_id, **entry, "pacing": pacing}, ensure_ascii=False, default=str))
+            record_segment(client_id, entry)
+            print(json.dumps({"segment": f"{index}/{len(segments)}", "client": client_id,
+                              **entry.public_record(), "pacing": pacing}, ensure_ascii=False))
     except HTTPException:
         raise
     except Exception as exc:

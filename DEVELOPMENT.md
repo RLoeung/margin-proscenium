@@ -32,7 +32,13 @@ From the project root:
 
 Foundation verification: all 10 routing tests passed on 2026-10-04. Restricted execution initially failed to launch the base interpreter; an approved execution outside that restriction succeeded. No code workaround was needed. Tests stub Kokoro and do not synthesize or download models.
 
-Never use broad discovery that imports `test_kokoro.py`: it synthesizes and writes WAVs at import time. Routing tests cover attribution, entity/pronoun safeguards, quote continuity and action cues, but bypass actual voice assignment and HTTP orchestration. Before related behavioral work, add focused coverage for segmentation, voice/recast policy, API/reset, pacing and failure handling; obtain explicit listening acceptance for audio changes.
+Never use broad discovery that imports `test_kokoro.py`: it synthesizes and writes WAVs at import time. The routing suite stubs Kokoro before importing the server. It now exercises the shared preparation/recording path, actual cast assignment and recast policy, and FastAPI requests with `synthesize` mocked to return a small in-memory array. No live synthesis, model download, or generated audio file is required.
+
+The first v0.16 slice adds coverage for narration versus scope-bound POV dialogue, unresolved identity and quote continuity, tentative pronouns, action/alternation evidence, adjacency-limited refinements that preserve rendered history, versioned serialization and malformed-state rejection, bounded memory, diagnostics/reset/client isolation, WAV metadata, and synthesis-error responses. The original action-prediction and narrator-as-first-person expectations intentionally changed. Parser/entity safeguards remain regression coverage. This is still not a complete segmentation/pacing/failure-transaction test suite or listening acceptance.
+
+Validation on 2026-10-05 after review corrections: all 35 routing tests passed. Corrective regressions cover rejected thought/silence/action prose after both unresolved and tentative dialogue, accepted bare speech tags, invalid identities in every identity-bearing snapshot location, malformed scope tokens, and retained tentative pronoun/gender/recast behavior. The expanded synthesis-failure regression documents surviving position, quote/active-decision, POV, entity/pronoun/gender, participant/turn, voice and recast mutations while rendered context remains unchanged; it does not introduce rollback. The restricted shell could not launch the venv's base interpreter; the approved run outside that restriction succeeded. FastAPI's test client emitted a Starlette deprecation warning about its installed `httpx` integration; no dependencies were changed.
+
+State remains in memory, keyed by client IP. `scripts/literary_state.py` provides schema-versioned JSON round trips only; no state files, storage configuration, persistence endpoints, or restart recovery were introduced. Reset creates a new scope on the next access. Scope IDs do not identify a book or automatically detect POV changes. See `ARCHITECTURE.md` for decision/status semantics and the existing concurrency and synthesis-failure limitations.
 
 Read README/architecture/roadmap and inspect current code, check Git status, create a development branch, make focused changes, run scoped tests, inspect the staged diff, then commit. Keep runtime source changes separate from foundation updates. Do not casually change single-voice narration while developing Proscenium.
 
@@ -56,7 +62,7 @@ Direct runtime imports require Kokoro, NumPy, FastAPI and Pydantic; the launcher
 
 ## Source map
 
-- `scripts/server.py`: Proscenium; `scripts/server_v0_11.py`: selected single-voice module; hyphenated v0.11 copies remain preserved.
+- `scripts/server.py`: Proscenium orchestration/inference; `scripts/literary_state.py`: typed literary/performance state and serialization boundary; `scripts/server_v0_11.py`: selected single-voice module; hyphenated v0.11 copies remain preserved.
 - `scripts/old-versions/`: historical sources; `test_server_routing.py`: safe routing suite; `test_kokoro.py`: manual synthesis script.
 - `extension/`: source and historical ZIPs; `launchers/`: preserved selector.
 - `.venv/`, `output/`, `voices/`: ignored environment/audio/model data.

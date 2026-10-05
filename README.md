@@ -12,7 +12,7 @@ That larger goal is still taking shape. The current version can separate passage
 
 **Proscenium — experimental multi-voice reading**
 
-The active development path uses different voices for narration and characters. It looks for clues in the writing to decide who is speaking. The current version is v0.15.
+The active development path uses different voices for narration and characters. It looks for clues in the writing to decide who is speaking. Development of v0.16 is underway from the preserved v0.15 baseline.
 
 **Single-voice narration — the stable sibling**
 
