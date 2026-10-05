@@ -61,4 +61,4 @@ Direct runtime imports require Kokoro, NumPy, FastAPI and Pydantic; the launcher
 - `extension/`: source and historical ZIPs; `launchers/`: preserved selector.
 - `.venv/`, `output/`, `voices/`: ignored environment/audio/model data.
 
-Baseline commit: `1efb79d05bb1cbbc97f4474640d9c6ba56d4f21f`. Publication boundary and outstanding privacy/license decisions live in [PUBLICATION.md](PUBLICATION.md); documentation cleanup does not remove personal metadata from earlier commits.
+Baseline commit: `1efb79d05bb1cbbc97f4474640d9c6ba56d4f21f`. Publication identity, MPL 2.0 and third-party distribution boundaries live in [PUBLICATION.md](PUBLICATION.md). The unpublished baseline was rewritten to sanitize public identity and historical user paths; runtime file hashes above are unchanged.

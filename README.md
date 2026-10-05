@@ -13,7 +13,7 @@ This is an early local development project. It runs in an existing Windows/Pytho
 
 For technically comfortable users evaluating the source, [DEVELOPMENT.md](DEVELOPMENT.md) records the current environment, exact launch commands and limitations. The existing BAT selector chooses either runtime path. Archived browser-extension releases are retained as history; their endpoint/port does not match the current Proscenium setup.
 
-User-facing installation, usage examples, screenshots/audio demonstrations and release instructions will be added as those workflows are validated. A project license has not yet been selected.
+User-facing installation, usage examples, screenshots/audio demonstrations and release instructions will be added as those workflows are validated. The project is stewarded by **Red Work Atelier** and licensed under [MPL 2.0](LICENSE). Copyright (c) 2026 Red Work Atelier. Third-party dependencies and downloaded models retain their own terms; see [the distribution note](PUBLICATION.md#dependencies-and-distribution).
 
 ## Project information
 

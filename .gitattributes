@@ -7,3 +7,5 @@ requirements-environment.txt text eol=lf
 scripts/** -text whitespace=cr-at-eol
 extension/** -text whitespace=cr-at-eol
 launchers/** -text whitespace=cr-at-eol
+LICENSE -text
+NOTICE text eol=lf
