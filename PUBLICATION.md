@@ -1,41 +1,79 @@
-# Publication boundary
+# Publication and Distribution
 
-Reviewed 2026-10-04. The Margin Proscenium is stewarded by **Red Work Atelier**. Public author and committer: `Red Work Atelier <5330732+RLoeung@users.noreply.github.com>`, configured only in this repository. Both unpublished commits were rewritten to use that identity and generic Windows user paths; their order, messages, dates and runtime contents were preserved. Private recovery history remains outside the repository. Publish the reviewed `main` branch, not a mirror of local application refs or recovery data.
+This document records the publication boundary for **The Margin Proscenium**, including project identity, source licensing, third-party dependencies, and the distinction between the public source repository and any future packaged release.
 
-## Repository boundary
+It is intentionally conservative. The current repository is safe to publish as source under the boundaries described here, but that does not automatically make every possible installer, bundled executable, model package, or redistributable build safe to ship without another review.
 
-The repository contains project source, tests, historical sources, launcher, dependency inventory and four small extension source ZIPs (17 text members). No vendored dependency source, dependency binaries, weights or voice tensors were identified. The largest historical source is about 59 KB. No embedded credentials or private service URLs were found in the source/archive review.
+## Project identity
 
-`.venv/`, generated audio/output, Python/tool/model caches, local environment files, scratch files and backups are excluded from Git. The verified preservation directory is outside the repository. Generic `C:\AI\kokoro` paths remain because they document the unchanged BAT contract; the extension's older localhost endpoint remains documented in DEVELOPMENT.md. Recheck staged files and history before publication.
-
-## Project license
+**The Margin Proscenium** is a Red Work Atelier project.
 
 Copyright (c) 2026 Red Work Atelier
 
-Original project software is licensed under [Mozilla Public License 2.0](LICENSE), including the project-owned historical source and extension source archives. The standard license text is unmodified. The root [NOTICE](NOTICE) applies Exhibit A to those files without altering preserved source bytes. No Exhibit B incompatibility designation is applied. Third-party software and assets retain their own licenses.
+The public repository is hosted at `RLoeung/margin-proscenium`. Repository-local Git authorship uses the Red Work Atelier identity rather than a personal development identity.
 
-MPL 2.0 is appropriate for the current source-only repository. Its file-level copyleft preserves changes to covered files while permitting larger works under other terms. [Mozilla's combination guidance](https://www.mozilla.org/en-US/MPL/2.0/combining-mpl-and-gpl/) explains the Section 3.3 route for GPL-family combinations; this is not a blanket clearance for an eventual packaged executable.
+The Red Work Atelier name, project names, logos, and other branding are separate from the source-code license. The Mozilla Public License grants rights to the covered software; it does not grant trademark or branding rights.
+
+## Source license
+
+Original project software in this repository is licensed under the **Mozilla Public License 2.0 (MPL-2.0)**. The repository contains the unmodified MPL 2.0 license text in `LICENSE`, with project attribution and additional notices in `NOTICE`.
+
+MPL 2.0 is a file-level copyleft license. Modifications to MPL-covered source files remain subject to the MPL when distributed, while the license can coexist with separately licensed files and dependencies. The MPL's secondary-license mechanism remains available under the terms of the license.
+
+This document is a project record, not legal advice.
+
+## What the public repository contains
+
+The public repository is intended to contain the project's own source, tests, documentation, historical source material that is appropriate to preserve, launcher material, and environment metadata useful for development.
+
+It does **not** intentionally publish the working virtual environment, downloaded model caches, generated audio, local configuration, temporary files, machine backups, or personal development credentials. `.gitignore` and the publication audit are intended to keep those boundaries explicit rather than relying on memory each time the repository is updated.
+
+The repository's source-only publication status should not be interpreted as a finished end-user distribution. The current development environment has not been reconstructed and validated as a clean-machine installation, and the project does not yet provide a general-user installer.
 
 ## Dependencies and distribution
 
-Installed metadata/license files were checked against upstream terms where relevant. The environment snapshot is not a bundled distribution or a validated clean-machine installer.
+The development environment relies on separately installed third-party software and separately downloaded model assets. Those components retain their own licenses and are not relicensed by the MPL merely because Proscenium uses them.
 
-| Component used by this project | Reviewed terms / boundary |
-| --- | --- |
-| [Kokoro](https://github.com/hexgrad/kokoro/blob/main/LICENSE) 0.9.4 and [Misaki](https://github.com/hexgrad/misaki/blob/main/LICENSE) 0.9.4 | Apache-2.0; separately installed Python code. |
-| [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | Model repository declares Apache-2.0; weights/config/voices download separately. No such assets are tracked. Pin and review exact asset revisions and preserve model-card attribution before redistribution. |
-| [eSpeak NG](https://github.com/espeak-ng/espeak-ng/blob/master/COPYING), phonemizer-fork 3.3.2 | GPLv3-family terms; installed phonemizer identifies GPLv3-or-later. Misaki imports phonemizer and loads the eSpeak DLL through ctypes in-process. This is not an isolated command-line subprocess boundary. |
-| [espeakng-loader](https://github.com/thewh1teagle/espeakng-loader/blob/main/LICENSE) 0.2.4 | Upstream loader code is MIT; its installed wheel includes eSpeak DLL/data, which are not made MIT by the loader license. Exact bundled native build/source provenance remains a packaging check. |
-| [PyTorch](https://github.com/pytorch/pytorch/blob/main/LICENSE) 2.13.0 | Main project BSD-3-Clause; installed wheel declares additional Apache/LLVM-exception, BSD-2, BSL and MIT components. Preserve its full notices if distributing wheels/binaries. |
-| [Transformers](https://github.com/huggingface/transformers/blob/main/LICENSE) 5.14.1 | Apache-2.0, separately installed. |
-| [spaCy](https://github.com/explosion/spaCy/blob/master/LICENSE) 3.8.14 and en_core_web_sm 3.8.0 | MIT in installed package/model license files; installed separately. |
-| [FastAPI](https://github.com/fastapi/fastapi/blob/master/LICENSE) 0.140.6 and [Pydantic](https://github.com/pydantic/pydantic/blob/main/LICENSE) 2.13.4 | MIT, separately installed. |
-| Uvicorn, Starlette, NumPy, SoundFile | BSD-3-Clause main licenses; NumPy wheel includes other permissive components. SoundFile's native [libsndfile](https://libsndfile.github.io/libsndfile/FAQ.html) uses LGPL terms; retain native notices and satisfy applicable relinking/source obligations if bundled. |
+Current dependency and asset notes include:
 
-Installing GPL dependencies separately does not relicense the project's original source automatically. It also does not establish that distributing an integrated executable is exempt from GPL obligations: the in-process phonemizer/eSpeak interaction needs a combined-work review. MPL 2.0 retains its secondary-license mechanism rather than unnecessarily replacing the project's license now.
+- **Kokoro 0.9.4** — Apache-2.0.
+- **Misaki 0.9.4** — Apache-2.0.
+- **hexgrad/Kokoro-82M** model repository — Apache-2.0. Model weights, configuration, and voice assets are downloaded separately and are not tracked in this repository. Exact revision and model-card attribution should be recorded before redistributing those assets.
+- **PyTorch** — BSD-3-Clause for the main project, with its accompanying third-party notices.
+- **Transformers** — Apache-2.0.
+- **spaCy** and the currently used `en_core_web_sm` model — MIT.
+- **FastAPI** and **Pydantic** — MIT.
+- **Uvicorn**, **Starlette**, **NumPy**, and **SoundFile** — permissive BSD-family licensing for the main Python projects.
+- **libsndfile**, used beneath SoundFile, has LGPL obligations that become relevant if its native library is bundled in a future distribution.
+- **espeakng-loader 0.2.4** — MIT for the loader package. Its wheel includes eSpeak NG native binaries/data, so a future bundled release needs to preserve the provenance and licensing obligations of those included components.
+- **eSpeak NG / phonemizer-related components** introduce GPL-family licensing considerations. Misaki's phonemization path loads eSpeak functionality in-process, which deserves specific review before an integrated binary or installer is distributed.
 
-Before an installer or bundled Release: inventory exact binaries, native data and model/voice revisions; retain all licenses/notices and model-card credits; resolve GPL corresponding-source/build obligations and MPL Section 3.3 treatment for any combined work; satisfy LGPL obligations; review PyTorch/NumPy native components and any GPU runtime terms. No such bundle is approved by this review. Existing extension ZIPs contain project source only, not these dependencies.
+The important boundary is that using these dependencies during development is not the same legal event as redistributing them inside one packaged product. A source repository that instructs users to install compatible dependencies separately has a different distribution surface from an installer that ships Python, native libraries, models, voices, and all runtime dependencies together.
 
-## Publication status
+## Model and voice assets
 
-The reviewed source repository has been published publicly on GitHub. No packaged release or installer has been created. Clean installation and listening validation remain future development/distribution work; README makes no claim that they are complete.
+Kokoro model and voice assets are currently downloaded outside Git and remain outside the project's tracked source. This is deliberate both for repository size and because model redistribution should be reviewed independently from source-code publication.
+
+Before Red Work Atelier redistributes model weights, voices, configuration, or cached Hugging Face assets, the project should pin the exact upstream revision being shipped, preserve the relevant model-card and license attribution, and confirm that every included asset is covered by the expected terms. Do not assume that a repository-level license automatically describes every file obtainable from that repository or cache.
+
+## Future packaged releases
+
+A future installer, standalone executable, container, appliance, or other integrated distribution needs a fresh dependency and licensing review based on what is actually included in that artifact.
+
+That review should identify bundled Python packages, native DLLs or shared libraries, model and voice assets, required license texts and notices, source-offer or source-availability obligations where applicable, and any interaction between MPL-covered project files and GPL/LGPL components. It should also verify the exact provenance and versions of the shipped artifacts rather than relying only on the current development environment snapshot.
+
+Packaging decisions should therefore follow the architecture and deployment plan. There is no need to solve hypothetical installer licensing before the project knows what it intends to bundle, but there is also no reason to assume the current source-publication review automatically covers that future artifact.
+
+## Publication hygiene
+
+The repository history was rewritten before initial public publication to use the Red Work Atelier identity and remove historical personal email and Windows username information from the public branch. Private local recovery history may still exist outside the public repository and should remain private.
+
+Future publication checks should focus on the actual diff and repository state rather than repeating the original audit from scratch. Before pushing significant new material, verify that generated audio, models, caches, credentials, machine-specific secrets, private backups, and unrelated personal files have not entered the tracked tree.
+
+Machine-specific development paths may appear in development documentation when they are necessary to describe the preserved environment. They should not be presented as required installation paths for future users.
+
+## Current publication status
+
+The current project boundary is suitable for a **public source repository** under MPL 2.0, with third-party dependencies and model assets remaining separately licensed and, where noted above, separately downloaded.
+
+That conclusion applies to the source repository as presently structured. It should be revisited when Red Work Atelier begins distributing model assets, native dependencies, an installer, a bundled runtime, or another integrated end-user release.
