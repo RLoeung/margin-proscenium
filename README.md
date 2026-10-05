@@ -1,38 +1,24 @@
 # The Margin Proscenium
 
-Local Kokoro literary narration with two intentional runtime paths:
+The Margin Proscenium is a local, Kokoro-based text-to-speech project for reading literary prose aloud. It combines narration, dialogue voices and pacing to explore how a story can be performed rather than simply spoken.
 
-- **Proscenium:** `scripts/server.py`, v0.15.0 deterministic multi-voice literary performance; current development line.
-- **Single-voice:** `scripts/server_v0_11.py`, v0.11.0 stable narration. Preserve its behavior independently of Proscenium development.
+Two listening paths are available in the current development setup:
 
-## Run
+- **Proscenium (v0.15):** the active multi-voice path, using deterministic rules to identify dialogue, infer speakers and assign voices.
+- **Single-voice narration (v0.11-derived):** the stable sibling path for straightforward narration, kept separate from Proscenium's casting and inference work.
 
-PowerShell, using the existing environment (one server at a time):
+## Can I use it?
 
-```powershell
-Set-Location C:\AI\kokoro
-# Proscenium
-.\.venv\Scripts\python.exe -m uvicorn scripts.server:app --host 0.0.0.0 --port 8282
-# Single-voice
-.\.venv\Scripts\python.exe -m uvicorn scripts.server_v0_11:app --host 0.0.0.0 --port 8282
-```
+This is an early local development project. It runs in an existing Windows/Python environment, but installation and distribution are not yet polished for general users. There is no installer or packaged release, and setup on a clean machine has not been verified. Model assets may need downloading before local synthesis can run.
 
-The unchanged selector is preserved at `launchers/Launch_Kokoro_TTS_Server_v2.bat`. The user's original remains in Downloads. Both use the commands above; the underscore filename is required by this launcher contract. Launch commands were verified against the BAT; live synthesis was not exercised during foundation work.
+For technically comfortable users evaluating the source, [DEVELOPMENT.md](DEVELOPMENT.md) records the current environment, exact launch commands and limitations. The existing BAT selector chooses either runtime path. Archived browser-extension releases are retained as history; their endpoint/port does not match the current Proscenium setup.
 
-Safe routing tests:
+User-facing installation, usage examples, screenshots/audio demonstrations and release instructions will be added as those workflows are validated. A project license has not yet been selected.
 
-```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s scripts -p test_server_routing.py -v
-```
+## Project information
 
-## Map
-
-- `scripts/`: both runtime paths and tests; `old-versions/`: v0.11/v0.12/v0.13 historical sources.
-- `extension/`: Isabella Reader source and release ZIPs, retained as project history.
-- `launchers/`: preserved BAT selector.
-- `requirements-environment.txt`: full installed-package snapshot, not a validated reconstruction lock.
-- `.venv/`, `output/`, `voices/`: local environment, generated audio, downloaded voices; excluded from Git.
-
-Read `ARCHITECTURE.md` for current behavior and seams, `DEVELOPMENT.md` for runtime/preservation details, and `ROADMAP.md` for direction. `AGENTS.md` gives concise agent working rules.
-
-The archived extension targets port 5150 `/speak` with `text`; this launcher uses 8282. Proscenium only accepts speech at `/v1/audio/speech` with `input`; single-voice retains `/speak`. No compatibility changes were made.
+- [Architecture](ARCHITECTURE.md): current processing and boundaries.
+- [Development](DEVELOPMENT.md): runtime recipe, source map, tests and preservation records.
+- [Roadmap](ROADMAP.md): current direction.
+- [Agent guidance](AGENTS.md): durable working context for Codex sessions.
+- [Publication review](PUBLICATION.md): repository boundary and remaining publication decisions.

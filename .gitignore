@@ -32,3 +32,19 @@ htmlcov/
 Thumbs.db
 /.idea/
 /.vscode/
+# Local-only backups, scratch work and additional model-cache locations
+/backups/
+/preservation/
+/kokoro-preservation-*/
+/local/
+/tmp/
+/temp/
+/.huggingface/
+/huggingface/
+/hf-cache/
+/.hf_cache/
+/.torch/
+*.tmp
+*.bak
+*.swp
+*.swo

@@ -2,7 +2,7 @@
 
 ## Runtime recipe
 
-Windows x64; existing venv: `C:\AI\kokoro\.venv`. Runtime verified as CPython 3.12.10 (MSC v.1943 AMD64). Base interpreter: `C:\Users\<user>\AppData\Local\Programs\Python\Python312\python.exe`.
+Windows x64; existing venv: `C:\AI\kokoro\.venv`. Runtime verified as CPython 3.12.10 (MSC v.1943 AMD64). The base interpreter is a per-user Python installation; its exact local path is recorded in the untracked `.venv/pyvenv.cfg`.
 
 Important installed versions: Kokoro 0.9.4, Misaki 0.9.4, FastAPI 0.140.6, Uvicorn 0.51.0, Pydantic 2.13.4, NumPy 2.5.1, Torch 2.13.0, SoundFile 0.14.0, spaCy 3.8.14, en_core_web_sm 3.8.0, Transformers 5.14.1, huggingface_hub 1.25.1, espeakng-loader 0.2.4.
 
@@ -12,7 +12,7 @@ Known gaps: no validated clean installation; most wheels lack recorded hashes/in
 
 ## Launcher contract
 
-Original: `C:\Users\<user>\Downloads\Launch_Kokoro_TTS_Server_v2.bat`. Exact copy: `launchers/Launch_Kokoro_TTS_Server_v2.bat`. It changes directory to `C:\AI\kokoro`, uses the existing venv, binds `0.0.0.0:8282`, and selects one of these commands:
+Original: the user's Downloads folder, `Launch_Kokoro_TTS_Server_v2.bat`. Exact copy: `launchers/Launch_Kokoro_TTS_Server_v2.bat`. It changes directory to `C:\AI\kokoro`, uses the existing venv, binds `0.0.0.0:8282`, and selects one of these commands:
 
 ```powershell
 Set-Location C:\AI\kokoro
@@ -47,3 +47,18 @@ Each original v0.11 copy SHA-256:
 `5BEC1C342D338DCD21A48F22FDD11FC5E681FA0CED137AC4A379A113B48B11C4`
 
 The initial Git checkpoint preserves pre-v0.16 source plus foundation documentation, dependency inventory and launcher. Generated output is backed up separately and ignored by Git. No runtime source or test behavior was changed.
+
+## Dependency and distribution boundary
+
+Direct runtime imports require Kokoro, NumPy, FastAPI and Pydantic; the launcher requires Uvicorn. The manual smoke script additionally imports SoundFile. Kokoro brings further dependencies and model assets. The snapshot includes transitive/tool packages and is not a minimal requirements declaration. The captured development environment passed routing tests; clean-machine installation and fresh end-to-end synthesis remain unverified.
+
+`C:\AI\kokoro` is the preserved development layout, not a required installation location for future users. The BAT remains machine-specific and unchanged. Its `0.0.0.0` binding listens on all interfaces; these unauthenticated development servers should not be exposed to untrusted networks. This is not a public hosting recipe.
+
+## Source map
+
+- `scripts/server.py`: Proscenium; `scripts/server_v0_11.py`: selected single-voice module; hyphenated v0.11 copies remain preserved.
+- `scripts/old-versions/`: historical sources; `test_server_routing.py`: safe routing suite; `test_kokoro.py`: manual synthesis script.
+- `extension/`: source and historical ZIPs; `launchers/`: preserved selector.
+- `.venv/`, `output/`, `voices/`: ignored environment/audio/model data.
+
+Baseline commit: `1efb79d05bb1cbbc97f4474640d9c6ba56d4f21f`. Publication boundary and outstanding privacy/license decisions live in [PUBLICATION.md](PUBLICATION.md); documentation cleanup does not remove personal metadata from earlier commits.
