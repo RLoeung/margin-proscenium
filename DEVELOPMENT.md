@@ -78,7 +78,29 @@ Do **not** use broad test discovery that imports `test_kokoro.py`. That file is 
 
 The routing suite stubs Kokoro before importing the server, so it can exercise routing and API behavior without downloading models or performing live synthesis. The suite covers the shared preparation and recording path, cast assignment and recast behavior, first-person narration versus scoped POV dialogue, unresolved identity, quotation continuity, tentative inference, action and alternation evidence, literary versus performance decisions, serialization, diagnostics, reset behavior, malformed-state rejection, synthesis failures, and API/WAV behavior.
 
-The current v0.16 performance-decision working tree passes 41 routing tests. Passing those tests is not listening acceptance. A routing decision can be internally correct and still produce an incoherent or unpleasant reading, so changes that affect audible behavior should also be tested through live synthesis and actual listening.
+The current v0.16 working tree passes 42 routing tests and 24 focused preflight tests. Passing those tests is not listening acceptance. A routing decision can be internally correct and still produce an incoherent or unpleasant reading, so changes that affect audible behavior should also be tested through live synthesis and actual listening.
+
+## Offline book preflight
+
+Generate a reusable artifact without loading Kokoro:
+
+```
+.\.venv\Scripts\python.exe -B -m scripts.book_preflight book.epub -o book.preflight.json
+```
+
+EPUB, PDF, UTF-8/UTF-16 TXT, and basic prose Markdown (`.md`) are supported. EPUB ingestion uses package spine order and preserves headings/paragraphs; PDF preserves page boundaries. PDF ingestion alone requires the optional `pypdf>=6,<7` dependency in `requirements-preflight.txt` (`python -m pip install -r requirements-preflight.txt`). The preserved environment snapshot is unchanged. Scanned/image-only and encrypted PDFs are unsupported; extraction warnings report missing text pages and layout uncertainty.
+
+Run the focused tests separately, without importing the manual synthesis script:
+
+```
+.\.venv\Scripts\python.exe -B -m unittest discover -s scripts -p test_book_preflight.py -v
+```
+
+For the single-reader development workflow, `POST /book/prior` selects one active prior for the whole server process, with the artifact as the JSON body. `GET /book/prior` exposes that same selection from any client IP without creating runtime state; management responses identify `attachment_scope: "server"`. Attachment/replacement clears all client literary/performance scopes, and every newly created IP-keyed scope receives the read-only active prior. `DELETE /book/prior` removes the selection and clears all scopes. `/context/reset` clears only the caller's runtime scope and retains the selected prior. Apply book changes while playback is stopped; the existing lack of concurrency coordination remains. The selection is process-local and disappears on restart. No source-position matching or reader changes are required. Programmatic callers can use `preflight_document(path)`, `BookPreflight.from_json(value)`, and `LiteraryState.for_book(prior)`.
+
+The immutable artifact retains extracted text blocks, document SHA-256/metadata, likely characters, aliases, supporting excerpts/spans, categorical confidence, and observation/inference provenance. It is an offline document artifact, separate from ordinary runtime state serialization; runtime round trips do not restore the attachment. An attached prior validates unambiguous known names/variants and suppresses absent weak action candidates, while explicit runtime attribution remains authoritative. Priors do not seed scene presence, pronoun bindings, gender locks, or voices. Alias lookup validates observed spellings; it does not merge runtime cast identities. Discovery uses conservative English speech/action rules; absence is not proof that a character does not exist. Gender evidence is retained only for narrow named-subject reflexive constructions and is not promoted into runtime fact.
+
+Validation on 2026-10-06 used the bundled CPython 3.12.14 with `.venv/Lib/site-packages` on `PYTHONPATH`, because the preserved virtual environment's base Python executable was missing. The environment was not rebuilt. PDF tests used the bundled pypdf installation; fresh installation of the optional dependency in the preserved environment remains unverified.
 
 ## Development workflow
 

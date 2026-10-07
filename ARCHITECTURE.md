@@ -127,9 +127,11 @@ This also reinforces the larger architectural principle: deterministic facts sho
 
 ## Lookahead and preflight context
 
+`scripts/book_preflight.py` now provides offline EPUB/PDF/TXT/Markdown ingestion and a separately versioned, validated, immutable `BookPreflight` artifact. SHA-256 identifies the source document; coarse text blocks anchor character, alias, and narrow pronoun evidence. Character status remains an inference even when its supporting speech/action observation is deterministic. For the single-reader development workflow, `POST /book/prior` selects one process-wide prior and clears all IP-keyed runtime scopes; new scopes receive that prior regardless of the management client's IP. `GET /book/prior` reads the shared selection, `DELETE /book/prior` clears it and all scopes, and `/context/reset` resets only the caller's scope while retaining the selection. This read-only book evidence lives outside runtime state serialization. It validates known names/variants or suppresses absent weak action candidates without overriding current explicit attribution, seeding scene participants, assigning voices, or synchronizing live requests to source positions. Runtime aliases remain observed identities rather than automatic cast merges.
+
 The current request model is reactive. Proscenium largely reasons from the text that has already arrived when a piece of audio needs to be produced. That works reasonably well for explicit attribution but makes sparse dialogue and later attribution unnecessarily difficult.
 
-A future preflight or lookahead layer could analyze more text than is immediately synthesized. At the beginning of a passage, Proscenium might inspect several paragraphs or a larger chapter window to discover likely characters, quotation conventions, explicit attribution anchors, POV evidence, paragraph relationships, and probable scene participants. Once playback begins, a rolling lookahead could continue preparing future context while the listener hears already-rendered material.
+A future lookahead layer could analyze more text than is immediately synthesized. At the beginning of a passage, Proscenium might inspect several paragraphs or a larger chapter window for quotation conventions, explicit attribution anchors, POV evidence, paragraph relationships, and probable scene participants. Once playback begins, a rolling lookahead could continue preparing future context while the listener hears already-rendered material.
 
 The desired architecture would still preserve the same evidence discipline:
 

@@ -48,3 +48,6 @@ Thumbs.db
 *.bak
 *.swp
 *.swo
+# Local preflight corpus and generated artifacts
+fixtures/preflight/*.epub
+fixtures/preflight/*.preflight.json

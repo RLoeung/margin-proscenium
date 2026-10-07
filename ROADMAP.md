@@ -58,9 +58,11 @@ The literary system must remain free to say `unresolved` even when the performan
 
 ## Lookahead and preflight analysis
 
+The first offline book-preflight slice now ingests EPUB, PDF, TXT, and Markdown and attaches validated, read-only character priors to a fresh runtime scope. It does not synchronize source positions or assign speakers throughout the document. Discovery coverage, alias identity reconciliation, and live listening validation of prior-assisted actor rejection remain follow-up work; runtime state persistence remains deferred.
+
 The current server largely reasons from text that has already arrived when audio needs to be synthesized. That forces it to solve literature through a narrow moving window, even when the answer may appear a paragraph later.
 
-A future preflight layer could analyze more text than is immediately spoken. At the beginning of a reading session or chapter, Proscenium could inspect a larger window for likely characters, aliases, quotation conventions, attribution anchors, POV evidence, paragraph relationships, recurring pronoun evidence, and probable scene participants. Once playback begins, a rolling lookahead could continue preparing upcoming text while already-rendered audio is playing.
+A future passage-lookahead layer could analyze more text than is immediately spoken. At the beginning of a reading session or chapter, Proscenium could inspect a larger window for quotation conventions, attribution anchors, POV evidence, paragraph relationships, recurring pronoun evidence, and probable scene participants. Once playback begins, a rolling lookahead could continue preparing upcoming text while already-rendered audio is playing.
 
 The intended flow remains:
 

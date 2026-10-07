@@ -1,6 +1,7 @@
 """Process-local literary state and a versioned serialization boundary.
 
-No storage, book identity, automatic scope detection, or synthesis lives here.
+No storage, automatic scope detection, or synthesis lives here. An immutable
+offline book prior may be attached separately from serialized runtime state.
 """
 from collections import deque
 import json
@@ -8,7 +9,12 @@ import re
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+
+if __package__:
+    from .book_preflight import BookPreflight
+else:
+    from book_preflight import BookPreflight
 
 
 CONTEXT_LENGTH = 16
@@ -47,6 +53,14 @@ class SpeakerDecision(StateModel):
         return self
 
 
+class PerformanceDecision(StateModel):
+    """Rendering choice only; never an input to literary inference."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    speaker: str | None = None
+    reason: str
+    confidence: Literal["high", "medium", "low"]
+
+
 class Classification(StateModel):
     type: str
     confidence: Literal["high", "medium", "low"]
@@ -69,6 +83,7 @@ class ContextEntry(StateModel):
     classification: Classification
     narrative_actor: str | None
     decision: SpeakerDecision
+    performance_decision: PerformanceDecision
     selected_voice: str
     cast_gender: Literal["female", "male"] | None
     voice_status: Literal["locked", "provisional", "pending_recast", "narrator"]
@@ -84,7 +99,7 @@ class ContextEntry(StateModel):
         return self
 
     def public_record(self):
-        """Keep existing diagnostic fields; decision is the original performance decision."""
+        """Keep literary diagnostics separate from the original rendering choice."""
         return {
             "text": self.text, **self.classification.model_dump(),
             "scope_id": self.scope_id, "position": self.position,
@@ -93,6 +108,7 @@ class ContextEntry(StateModel):
             "routing_reason": self.decision.reason,
             "speaker_confidence": self.decision.confidence, "voice_status": self.voice_status,
             "decision": self.decision.model_dump(mode="json"),
+            "performance_decision": self.performance_decision.model_dump(mode="json"),
             "refinement": self.refinement.model_dump(mode="json") if self.refinement else None,
             "following_evidence": [e.model_dump(mode="json") for e in self.following_evidence],
         }
@@ -132,6 +148,8 @@ class PerformanceState(StateModel):
 
 
 class LiteraryState(StateModel):
+    # Immutable external evidence, deliberately outside runtime serialization.
+    _book_prior: BookPreflight | None = PrivateAttr(default=None)
     schema_version: Literal[1] = 1
     # An opaque reading scope, not a book, protagonist, or detected chapter.
     scope_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1, pattern=SCOPE_PATTERN)
@@ -139,6 +157,17 @@ class LiteraryState(StateModel):
     scene: SceneState = Field(default_factory=SceneState)
     performance: PerformanceState = Field(default_factory=PerformanceState)
     context: deque[ContextEntry] = Field(default_factory=lambda: deque(maxlen=CONTEXT_LENGTH), max_length=CONTEXT_LENGTH)
+
+    @property
+    def book_prior(self):
+        return self._book_prior
+
+    @classmethod
+    def for_book(cls, prior: BookPreflight):
+        """A deliberate book attachment starts a fresh literary/performance scope."""
+        state = cls()
+        state._book_prior = BookPreflight.from_json(prior.to_json())
+        return state
 
     def pov_identity(self):
         if self.scene.pov_entity_id is None:
@@ -176,7 +205,8 @@ class LiteraryState(StateModel):
         identities.extend(self.scene.pronouns.values())
         identities.extend((self.scene.last_speaker, self.scene.previous_speaker, self.scene.pov_entity_id))
         for entry in self.context:
-            identities.extend((entry.narrative_actor, entry.classification.speaker_name))
+            identities.extend((entry.narrative_actor, entry.classification.speaker_name,
+                               entry.performance_decision.speaker))
         identities.extend(e.candidate for e in evidence)
         for identity in identities:
             if identity is None:

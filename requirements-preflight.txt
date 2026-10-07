@@ -1,0 +1,2 @@
+# Optional offline PDF ingestion. EPUB/TXT/Markdown use the standard library.
+pypdf>=6,<7

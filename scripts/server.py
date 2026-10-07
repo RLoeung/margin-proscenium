@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from io import BytesIO
 import json
 import re
@@ -12,12 +13,20 @@ from kokoro import KPipeline
 from pydantic import BaseModel, Field
 
 if __package__:
-    from .literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision
+    from .book_preflight import BookPreflight
+    from .literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision, PerformanceDecision
 else:
-    from literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision
+    from book_preflight import BookPreflight
+    from literary_state import Classification, ContextEntry, Evidence, LiteraryState, SpeakerDecision, PerformanceDecision
 
 
-app = FastAPI(title="Local Kokoro Narration Server", version="0.16.0-dev")
+@asynccontextmanager
+async def lifespan(application):
+    print(f"The Margin Proscenium v{application.version}", flush=True)
+    yield
+
+
+app = FastAPI(title="Local Kokoro Narration Server", version="0.16.0-dev", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,6 +34,45 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# BEGIN TEMPORARY ingress diagnostic: remove this block after the live experiment.
+from itertools import count
+
+_ingress_numbers = count(1)  # Diagnostic only; resets when this process restarts.
+_grouping_fields = (
+    "request_id", "utterance_id", "session_id", "document_id", "book_id",
+    "chapter_id", "paragraph_id", "span_id", "start_offset", "end_offset",
+    "sequence", "sequence_number",
+)
+
+
+@app.middleware("http")
+async def temporary_speech_ingress_diagnostic(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/v1/audio/speech":
+        number = next(_ingress_numbers)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeError):
+            body = None
+        # Read before model validation (which ignores extra fields). Never log
+        # headers, query strings, arbitrary fields, or nested metadata objects.
+        data = body if isinstance(body, dict) else {}
+        text = data.get("input")
+        escaped = (json.dumps(text, ensure_ascii=True).replace(" ", r"\u0020")
+                   if isinstance(text, str) else "<missing or non-string input>")
+        grouping = {key: data[key] for key in _grouping_fields
+                    if key in data and isinstance(data[key], (str, int, float, bool, type(None)))}
+        print(
+            f"=== SPEECH INGRESS REQUEST {number} BEGIN ===\n"
+            f"client={request.client.host if request.client else 'unknown'}\n"
+            f"input_escaped={escaped}\n"
+            f"grouping={json.dumps(grouping, ensure_ascii=True)}\n"
+            f"=== SPEECH INGRESS REQUEST {number} END ===",
+            flush=True,
+        )
+    return await call_next(request)
+
+# END TEMPORARY ingress diagnostic.
 
 PIPELINES = {
     "a": KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M"),
@@ -45,7 +93,16 @@ BASE_TRAILING_PAUSE_MS = {
     "question": 290, "exclamation": 290, "ellipsis": 420, "other": 180,
 }
 
-LITERARY_STATES = defaultdict(LiteraryState)
+# Single-reader development selection; shared immutable evidence, not shared
+# mutable literary/performance state. Explicit book changes clear every scope.
+ACTIVE_BOOK_PRIOR: BookPreflight | None = None
+
+
+def new_literary_state():
+    return LiteraryState.for_book(ACTIVE_BOOK_PRIOR) if ACTIVE_BOOK_PRIOR is not None else LiteraryState()
+
+
+LITERARY_STATES = defaultdict(new_literary_state)
 
 ATTRIBUTION_VERBS = (
     "say", "says", "said", "ask", "asks", "asked", "answer", "answers", "answered",
@@ -354,7 +411,6 @@ def assign_cast_voice(client_id: str, speaker: str | None, gender, narrator_voic
     voice = choose_pool_voice(state, known_gender, narrator_voice)
     state.voices[speaker] = voice
     if known_gender:
-        literary.scene.gender[speaker] = known_gender
         state.voice_status[speaker] = "locked"
     else:
         state.voice_status[speaker] = "provisional"
@@ -368,6 +424,19 @@ def observe_narrative_actor(client_id: str, text: str):
     match = LEADING_NAME_PATTERN.search(text)
     if match and valid_name_candidate(match.group(1)):
         actor = match.group(1)
+        literary = LITERARY_STATES[client_id]
+        if literary.book_prior and not literary.book_prior.find_character(actor):
+            # Absence rejects only weak action evidence. Current attribution
+            # remains authoritative, including personified weather.
+            explicit = extract_speaker_hint(text).get("speaker_name")
+            observed = any(
+                e.kind == "explicit-name" and e.strength == "definitive" and e.candidate == actor
+                for entry in literary.context
+                for decision in (entry.decision, entry.refinement) if decision
+                for e in decision.evidence
+            ) or actor in state.participants
+            if explicit != actor and not observed:
+                return None
         remember_entity(client_id, actor)
         # Possessive pronouns in a named actor sentence are reliable trait clues.
         if re.search(r"\bher\b", text, re.I):
@@ -496,6 +565,30 @@ def update_scene_after_narration(client_id: str, entry: ContextEntry):
         ),)
 
 
+def decide_performance(literary: LiteraryState, decision: SpeakerDecision):
+    """Read literary evidence without writing back a rendering guess.
+
+    Quote continuations retain their original literary evidence. Cast membership
+    alone is deliberately not proof that a candidate is a literary entity.
+    """
+    if decision.status in ("resolved", "tentative"):
+        return PerformanceDecision(speaker=decision.speaker, reason=decision.reason,
+                                   confidence=decision.confidence)
+    if decision.status == "unresolved":
+        cues = [e for e in decision.evidence
+                if e.kind in ("preceding-action", "two-person-alternation") and e.candidate]
+        candidates = {e.candidate for e in cues}
+        established = set(literary.scene.recent_entities) | set(literary.scene.participants)
+        if literary.scene.pov_entity_id:
+            established.add(literary.scene.pov_entity_id)
+        if len(candidates) == 1 and candidates <= established:
+            return PerformanceDecision(speaker=cues[0].candidate,
+                                       reason="tentative-" + cues[0].kind, confidence="low")
+    return PerformanceDecision(reason="narration" if decision.status == "narration"
+                               else "insufficient-evidence-narrator-fallback",
+                               confidence="high" if decision.status == "narration" else "low")
+
+
 def prepare_segment(client_id: str, text: str, narrator_voice: str):
     """Shared routing path for HTTP and model-free regression tests."""
     literary = LITERARY_STATES[client_id]
@@ -503,15 +596,17 @@ def prepare_segment(client_id: str, text: str, narrator_voice: str):
     classification = classify_utterance(client_id, text)
     actor = None if classification["is_dialogue"] else observe_narrative_actor(client_id, text)
     decision = infer_speaker(client_id, text, classification)
-    gender = literary.scene.gender.get(decision.speaker)
+    performance_decision = decide_performance(literary, decision)
+    gender = literary.scene.gender.get(performance_decision.speaker)
     voice = narrator_voice if not classification["is_dialogue"] else assign_cast_voice(
-        client_id, decision.speaker, gender, narrator_voice
+        client_id, performance_decision.speaker, gender, narrator_voice
     )
     return ContextEntry(
         scope_id=literary.scope_id, position=literary.position, text=text,
         classification=Classification(**classification), narrative_actor=actor,
-        decision=decision, selected_voice=voice, cast_gender=gender,
-        voice_status=literary.performance.voice_status.get(decision.speaker, "narrator"),
+        decision=decision, performance_decision=performance_decision,
+        selected_voice=voice, cast_gender=gender,
+        voice_status=literary.performance.voice_status.get(performance_decision.speaker, "narrator"),
     )
 
 
@@ -634,6 +729,37 @@ def reset_context(request: Request):
     client_id = request.client.host if request.client else "unknown"
     LITERARY_STATES.pop(client_id, None)
     return {"status": "reset", "client": client_id}
+
+
+@app.post("/book/prior")
+def attach_book_prior(payload: BookPreflight, request: Request):
+    """Select the book for all clients in this single-reader server process."""
+    global ACTIVE_BOOK_PRIOR
+    # Validate before replacing the selection or discarding any client state.
+    prior = BookPreflight.from_json(payload.to_json())
+    client_id = request.client.host if request.client else "unknown"
+    ACTIVE_BOOK_PRIOR = prior
+    LITERARY_STATES.clear()
+    literary = LITERARY_STATES[client_id]
+    return {"client": client_id, "attachment_scope": "server", "scope_id": literary.scope_id,
+            "document": prior.document.model_dump(mode="json"),
+            "characters": len(prior.characters)}
+
+
+@app.get("/book/prior")
+def book_prior(request: Request):
+    client_id = request.client.host if request.client else "unknown"
+    return {"client": client_id, "attachment_scope": "server",
+            "prior": ACTIVE_BOOK_PRIOR.model_dump(mode="json") if ACTIVE_BOOK_PRIOR else None}
+
+
+@app.delete("/book/prior")
+def detach_book_prior(request: Request):
+    global ACTIVE_BOOK_PRIOR
+    ACTIVE_BOOK_PRIOR = None
+    LITERARY_STATES.clear()
+    client_id = request.client.host if request.client else "unknown"
+    return {"status": "reset", "client": client_id, "attachment_scope": "server"}
 
 
 @app.post("/v1/audio/speech")

@@ -222,7 +222,9 @@ class RoutingRegressionTests(unittest.TestCase):
             self.assertIsNone(entry["cast_speaker"])
         state = server.LITERARY_STATES["open-unknown"]
         self.assertEqual([], list(state.scene.participants))
-        self.assertEqual({}, state.performance.voices)
+        self.assertEqual({"Mara"}, set(state.performance.voices))
+        for entry in (first, second):
+            self.assertEqual("Mara", entry["performance_decision"]["speaker"])
         self.assertIsNone(state.scene.last_speaker)
 
     def test_unbound_references_are_unresolved_without_placeholder_cast(self):
@@ -471,6 +473,7 @@ class RoutingRegressionTests(unittest.TestCase):
             ("scene", "active_decision", "evidence", 0, "candidate"),
             ("context", 0, "narrative_actor"), ("context", 0, "classification", "speaker_name"),
             ("context", 0, "decision", "speaker"), ("context", 0, "refinement", "speaker"),
+            ("context", 0, "performance_decision", "speaker"),
             ("context", 0, "decision", "evidence", 0, "candidate"),
             ("context", 0, "refinement", "evidence", 0, "candidate"),
             ("context", 0, "following_evidence", 0, "candidate"),
@@ -539,6 +542,114 @@ class RoutingRegressionTests(unittest.TestCase):
             self.assertEqual(other["scope_id"], server.LITERARY_STATES["reader-two"].scope_id)
             client.post("/v1/audio/speech", json={"input": '"Again," I said.'})
             self.assertNotEqual(cast["pov_entity_id"], client.get("/cast").json()["pov_entity_id"])
+
+    def test_performance_matches_resolved_named_and_pov_speakers(self):
+        for text in ('"Wait," Mara said.', '"Wait," I said.'):
+            entry = self.process("matching", text)
+            self.assertEqual(entry["decision"]["speaker"], entry["performance_decision"]["speaker"])
+            self.assertEqual("high", entry["performance_decision"]["confidence"])
+
+    def test_performance_guess_is_read_only_for_literary_state(self):
+        self.process("guess", "Mara raised her hand.")
+        state = server.LITERARY_STATES["guess"]
+        state.position += 1
+        text = '"Wait.'
+        classification = server.classify_utterance("guess", text)
+        decision = server.infer_speaker("guess", text, classification)
+        before = state.scene.model_dump()
+        original = decision.model_dump()
+        performance = server.decide_performance(state, decision)
+        voice = server.assign_cast_voice("guess", performance.speaker,
+                                         state.scene.gender.get(performance.speaker), server.DEFAULT_VOICE)
+        self.assertEqual("Mara", performance.speaker)
+        self.assertEqual("tentative-preceding-action", performance.reason)
+        self.assertEqual("low", performance.confidence)
+        self.assertNotEqual(server.DEFAULT_VOICE, voice)
+        self.assertEqual(before, state.scene.model_dump())
+        self.assertEqual(original, decision.model_dump())
+        self.assertEqual("unresolved", state.scene.active_decision.status)
+        self.assertIsNone(state.scene.active_decision.speaker)
+
+    def test_later_attribution_can_disagree_with_performance_guess(self):
+        self.process("disagree", "Mara ducked.")
+        original = self.process("disagree", '"Wait."')
+        self.process("disagree", "Elias said.")
+        state = server.LITERARY_STATES["disagree"]
+        prior = state.context[-2]
+        self.assertIsNone(prior.decision.speaker)
+        self.assertEqual("unresolved", prior.decision.status)
+        self.assertEqual("Mara", prior.performance_decision.speaker)
+        self.assertEqual(original["selected_voice"], prior.selected_voice)
+        self.assertEqual("Elias", prior.refinement.speaker)
+        self.assertEqual(["Elias"], list(state.scene.participants))
+        self.assertEqual("Elias", state.scene.last_speaker)
+        following = self.process("disagree", '"Again."')
+        self.assertIsNone(following["performance_decision"]["speaker"])
+        self.assertEqual([], following["decision"]["evidence"])
+        restored = server.LiteraryState.from_json(state.to_json())
+        self.assertEqual(state.model_dump(), restored.model_dump())
+
+    def test_missing_conflicting_or_cast_only_evidence_uses_narrator(self):
+        empty = self.process("empty", '"Wait."')
+        self.process("conflicting", '"Yes," Mara said.')
+        self.process("conflicting", '"No," Elias said.')
+        self.process("conflicting", "Elias ducked.")
+        conflict = self.process("conflicting", '"Wait."')
+        for entry in (empty, conflict):
+            self.assertIsNone(entry["performance_decision"]["speaker"])
+            self.assertEqual(server.DEFAULT_VOICE, entry["selected_voice"])
+        state = server.LiteraryState()
+        state.performance.voices["Mara"] = "af_heart"
+        evidence = server.Evidence(kind="preceding-action", scope_id=state.scope_id,
+                                   position=1, text="Mara ducked.", candidate="Mara", strength="suggestive")
+        decision = server.SpeakerDecision(status="unresolved", reason="test", confidence="low", evidence=(evidence,))
+        self.assertIsNone(server.decide_performance(state, decision).speaker)
+        self.assertEqual([], list(state.scene.recent_entities))
+
+    def test_alternation_performance_does_not_seed_another_guess(self):
+        first = self.process("performance-turns", '"Yes," Mara said.')
+        self.process("performance-turns", '"No," Elias said.')
+        guess = self.process("performance-turns", '"Please."')
+        self.assertEqual("Mara", guess["performance_decision"]["speaker"])
+        self.assertEqual(first["selected_voice"], guess["selected_voice"])
+        self.assertIsNone(guess["decision"]["speaker"])
+        following = self.process("performance-turns", '"Again."')
+        self.assertIsNone(following["performance_decision"]["speaker"])
+        self.assertEqual([], following["decision"]["evidence"])
+
+    def test_startup_prints_canonical_application_version(self):
+        with patch.object(server.app, "version", "test-version"), patch("builtins.print") as output:
+            with TestClient(server.app) as client:
+                self.assertEqual("test-version", client.get("/health").json()["version"])
+            output.assert_any_call("The Margin Proscenium vtest-version", flush=True)
+
+    def test_temporary_ingress_diagnostic_preserves_input_and_filters_metadata(self):
+        text = '  First\t phrase.\r\n\nSecond sentence.  '
+        with TestClient(server.app) as client, \
+                patch.object(server, "synthesize", return_value=np.ones(100, dtype=np.float32)) as synth, \
+                patch("builtins.print") as output:
+            response = client.post("/v1/audio/speech?token=query-secret", json={
+                "input": text, "paragraph_id": "p7", "sequence": 2,
+                "api_key": "body-secret", "span_id": {"token": "nested-secret"},
+            }, headers={"Authorization": "Bearer header-secret"})
+            self.assertEqual(200, response.status_code)
+            diagnostic = output.call_args_list[0].args[0]
+            lines = diagnostic.splitlines()
+            self.assertTrue(lines[0].startswith("=== SPEECH INGRESS REQUEST "))
+            self.assertEqual(lines[0].replace("BEGIN", "END"), lines[-1])
+            escaped = next(line.removeprefix("input_escaped=") for line in lines
+                           if line.startswith("input_escaped="))
+            self.assertEqual(text, json.loads(escaped))
+            self.assertNotIn(" ", escaped)
+            grouping = json.loads(next(line.removeprefix("grouping=") for line in lines
+                                       if line.startswith("grouping=")))
+            self.assertEqual({"paragraph_id": "p7", "sequence": 2}, grouping)
+            self.assertNotIn("secret", diagnostic)
+            self.assertEqual(server.segment_text(text), [call.args[0] for call in synth.call_args_list])
+            client.post("/v1/audio/speech", json={"input": "Again."})
+            diagnostics = [call.args[0] for call in output.call_args_list
+                           if call.args[0].startswith("=== SPEECH INGRESS REQUEST ")]
+            self.assertEqual(int(diagnostics[0].split()[4]) + 1, int(diagnostics[1].split()[4]))
 
     def test_synthesis_failure_does_not_append_rendered_context(self):
         cases = {
