@@ -43,7 +43,11 @@ def clean_name(raw):
         parts.pop(0)
     if not parts or any(p.casefold() in NON_NAME_KEYS for p in parts):
         return None
+    if len(parts) > 1 and any(re.search(r"['’]s$", p) for p in parts):
+        return None  # 'Laurie's English friends' is not the compound name Laurie English.
     value = " ".join(re.sub(r"['’]s$", "", p) for p in parts)
+    if any(p.casefold() in NON_NAME_KEYS for p in value.split()):
+        return None
     return value if re.fullmatch(FULL_NAME, value) else None
 
 
@@ -226,7 +230,7 @@ class CharacterPrior(PriorModel):
 
 class BookPreflight(PriorModel):
     schema_version: Literal[2]
-    discovery_version: Literal["deterministic-en-2"] = "deterministic-en-2"
+    discovery_version: Literal["deterministic-en-2"]
     document: DocumentIdentity
     blocks: tuple[TextBlock, ...] = Field(min_length=1)
     observations: tuple[LiteraryObservation, ...]
@@ -267,6 +271,8 @@ class BookPreflight(PriorModel):
             _, mask = masks[source.block]
             if observation.in_dialogue != all(mask[source.start:source.end]):
                 raise ValueError("Quotation context must match source punctuation")
+            if observation.kind in ("speech-attribution", "human-action", "alias-cue") and any(mask[source.start:source.end]):
+                raise ValueError("Narrative cues cannot come from words inside dialogue")
             text = source.excerpt
             if observation.kind == "name-mention":
                 if (not re.fullmatch(FULL_NAME, text) or clean_name(text) != observation.normalized_form or
@@ -284,6 +290,9 @@ class BookPreflight(PriorModel):
                 raise ValueError("Alias cue must match its source construction")
             elif observation.kind == "dialogue-span" and not observation.in_dialogue:
                 raise ValueError("Dialogue observation must be within quotation marks")
+            if observation.kind == "dialogue-span" and ((source.start and mask[source.start - 1]) or
+                    (source.end < len(mask) and mask[source.end])):
+                raise ValueError("Dialogue observations must retain the complete block-local quoted span")
             observed[observation.observation_id] = observation
         surfaces = [c.surface for c in self.candidates]
         if len(set(surfaces)) != len(surfaces):
@@ -303,6 +312,7 @@ class BookPreflight(PriorModel):
                 raise ValueError("Candidate occurrences must be source-ordered")
         if referenced != {o.observation_id for o in self.observations if o.kind == "name-mention"}:
             raise ValueError("Every name observation must remain available as candidate evidence")
+        anchors = {(o.kind, o.source.block, o.source.start, o.source.end) for o in self.observations}
         for character in self.characters:
             if character.identity not in surfaces:
                 raise ValueError("Promoted characters must have candidate observations")
@@ -317,8 +327,7 @@ class BookPreflight(PriorModel):
                 if not any((match := pattern.fullmatch(e.excerpt)) and
                            clean_name(match["name"]) == character.identity for pattern in patterns):
                     raise ValueError("Character evidence must support its named identity")
-                if not any(o.kind == e.kind and o.source.start == e.start and o.source.end == e.end
-                           and o.source.block == e.block for o in self.observations):
+                if (e.kind, e.block, e.start, e.end) not in anchors:
                     raise ValueError("Promotion anchors must be recorded observations")
             for alias in character.aliases:
                 for e in alias.evidence:
@@ -370,7 +379,7 @@ class BookPreflight(PriorModel):
             block = self.blocks[source.block]
             start, end = max(0, source.start - context_chars), min(len(block.text), source.end + context_chars)
             nearby = [o for o in self.observations if o.source.block == source.block
-                      and o.observation_id != ref and o.source.start < end and o.source.end > start]
+                      and o.observation_id != ref and start <= o.source.start and o.source.end <= end]
             # Keep useful non-name cues ahead of competing lexical mentions.
             nearby.sort(key=lambda o: (o.kind == "name-mention", abs(o.source.start - source.start), int(o.observation_id[1:])))
             selected.append({"occurrence": observation.model_dump(mode="json"),
@@ -380,6 +389,7 @@ class BookPreflight(PriorModel):
         return {"schema_version": self.schema_version, "discovery_version": self.discovery_version,
                 "document": self.document.model_dump(mode="json"), "surface": surface,
                 "basis": candidate.basis, "status": candidate.status,
+                "sampling": "first-occurrences; nearby cues wholly within context",
                 "total_occurrences": len(candidate.occurrences), "occurrences": selected}
 
     @classmethod
@@ -531,14 +541,43 @@ def ingest_document(path: str | Path):
             else:
                 warnings.append(f"Page {number} has no extractable text; OCR is not provided")
         warnings.append("PDF page order is preserved; paragraph and column order may be unreliable")
+    blocks = exclude_gutenberg_boilerplate(blocks, warnings)
     if not blocks:
         raise ValueError("Document has no readable text (scanned PDFs require external OCR)")
     return DocumentIdentity(**metadata), tuple(blocks), tuple(warnings)
 
 
-def _outside_quotes(text, opened=False):
+def exclude_gutenberg_boilerplate(blocks, warnings):
+    """Only explicit full-block Gutenberg separators define removal boundaries.
+
+    Keep original coarse locators, work text and independently extracted metadata.
+    A Gutenberg mention in prose or an unrecognized publisher is left alone.
+    """
+    marker = re.compile(r"^\*{3}\s*(START|END) OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b.*?\*{3}$", re.I)
+    starts, ends = [], []
+    for index, block in enumerate(blocks):
+        match = marker.fullmatch(block.text.strip())
+        if match:
+            (starts if match[1].upper() == "START" else ends).append(index)
+    if len(starts) > 1 or len(ends) > 1 or (starts and ends and starts[0] >= ends[0]):
+        warnings.append("Ambiguous Project Gutenberg separators; boilerplate retained")
+        return blocks
+    first = starts[0] + 1 if starts else 0
+    last = ends[0] if ends else len(blocks)
+    # These Gutenberg fixtures place a cover-art license immediately before END,
+    # outside the footer. Remove only this exact, identifiable two-block tail.
+    if (ends and last - first >= 2 and
+            re.fullmatch(r"Transcriber['’]s Notes", blocks[last - 2].text, re.I) and
+            blocks[last - 1].text == "New original cover art included with this eBook is granted to the public domain."):
+        last -= 2
+    if starts or ends:
+        warnings.append(f"Excluded {first + len(blocks) - last} Project Gutenberg boilerplate blocks using explicit separators")
+    return blocks[first:last]
+
+
+def _quote_surface(text, opened=False):
     # Replace quotation content with spaces so offsets remain source-relative.
-    result = []
+    result, mask = [], []
     for char in text:
         if char == "“":
             opened = True
@@ -546,8 +585,67 @@ def _outside_quotes(text, opened=False):
             opened = False
         elif char == '"':
             opened = not opened
-        result.append(" " if opened or char in '“”"' else char)
-    return "".join(result), opened
+        quoted = opened or char in '“”"'
+        result.append(" " if quoted else char)
+        mask.append(quoted)
+    return "".join(result), mask, opened
+
+
+def _outside_quotes(text, opened=False):
+    surface, _, opened = _quote_surface(text, opened)
+    return surface, opened
+
+
+def quote_surfaces(blocks):
+    result, opened = [], False
+    for block in blocks:
+        surface, mask, opened = _quote_surface(block.text, opened)
+        result.append((surface, mask))
+    return result
+
+
+def collect_observations(blocks):
+    """Lexical/source observations only; name shape does not prove personhood."""
+    records = []
+    for index, (block, (outside, mask)) in enumerate(zip(blocks, quote_surfaces(blocks))):
+        if block.kind == "heading":
+            continue
+
+        def add(start, end, kind, rule, normalized=None):
+            records.append(dict(kind=kind, rule=rule, normalized_form=normalized,
+                source=SourceSpan(block=index, locator=block.locator, start=start, end=end,
+                                  excerpt=block.text[start:end]), in_dialogue=all(mask[start:end])))
+
+        # Preserve individual names even in a capitalized phrase we cannot parse.
+        # Only retain a compound surface when no discourse/grammatical token was swallowed.
+        matches = [(m.start(), m.end(), m[0]) for m in NAME_TOKEN.finditer(block.text)]
+        matches.extend((m.start(), m.end(), m[0]) for m in NAME_RUN.finditer(block.text)
+                       if len(m[0].split()) > 1 and not any(p.casefold() in NON_NAME_KEYS for p in m[0].split()))
+        for start, end, raw in matches:
+            name = clean_name(raw)
+            if name and not any(p.casefold() in NON_NAME_KEYS for p in raw.split()):
+                add(start, end, "name-mention", "capitalized-surface", name)
+        for match in PRONOUN_TOKEN.finditer(block.text):
+            add(match.start(), match.end(), "pronoun-mention", "pronoun-token")
+        for match in re.finditer(r"1+", "".join("1" if quoted else "0" for quoted in mask)):
+            add(match.start(), match.end(), "dialogue-span", "quotation-marks")
+        for _, start, end, kind, rule in named_cues(outside):
+            if not re.search(r'[“”"]', block.text[start:end]):
+                add(start, end, kind, rule)
+        for match in REFERENCE_SPEECH.finditer(outside):
+            if REFERENCE_SPEECH.fullmatch(block.text[match.start():match.end()]):
+                add(match.start(), match.end(), "speech-attribution", "reference-speech")
+        for match in ALIAS.finditer(outside):
+            if ALIAS.fullmatch(block.text[match.start():match.end()]):
+                add(match.start(), match.end(), "alias-cue", "explicit-alias")
+    records.sort(key=lambda o: (o["source"].block, o["source"].start, o["source"].end, o["kind"]))
+    observations = tuple(LiteraryObservation(observation_id=f"o{index}", **record) for index, record in enumerate(records))
+    occurrences = {}
+    for observation in observations:
+        if observation.kind == "name-mention":
+            occurrences.setdefault(observation.normalized_form, []).append(observation.observation_id)
+    candidates = tuple(IdentityCandidate(surface=surface, occurrences=tuple(refs)) for surface, refs in sorted(occurrences.items()))
+    return observations, candidates
 
 
 def discover_characters(blocks):
@@ -558,17 +656,12 @@ def discover_characters(blocks):
         surfaces.append(surface)
         if block.kind == "heading":
             continue
-        for pattern, kind, rule in ((SPEECH_BEFORE, "speech-attribution", "named-speech"),
-                                    (SPEECH_AFTER, "speech-attribution", "named-speech"),
-                                    (ACTION, "human-action", "human-action")):
-            for match in pattern.finditer(surface):
-                name = " ".join(match["name"].split())
-                if any(part in NON_NAMES for part in name.split()):
-                    continue
-                e = PriorEvidence(block=index, start=match.start(), end=match.end(),
-                                  excerpt=block.text[match.start():match.end()], kind=kind,
-                                  basis="observation", rule=rule)
-                support.setdefault(name, []).append(e)
+        for name, start, end, kind, rule in named_cues(surface):
+            if re.search(r'[“”"]', block.text[start:end]):
+                continue
+            e = PriorEvidence(block=index, start=start, end=end,
+                              excerpt=block.text[start:end], kind=kind, basis="observation", rule=rule)
+            support.setdefault(name, []).append(e)
     known = {name: evidence for name, evidence in support.items()
              if any(e.kind == "speech-attribution" for e in evidence)
              or len({(e.block, e.start) for e in evidence}) >= 2}
@@ -577,14 +670,14 @@ def discover_characters(blocks):
     for index, surface in enumerate(surfaces):
         for match in ALIAS.finditer(surface):
             name, alias = " ".join(match["name"].split()), " ".join(match["alias"].split())
-            if name in known and alias != name and not any(p in NON_NAMES for p in alias.split()):
+            if name in known and alias != name and clean_name(alias) == alias and ALIAS.fullmatch(blocks[index].text[match.start():match.end()]):
                 e = PriorEvidence(block=index, start=match.start(), end=match.end(),
                                   excerpt=blocks[index].text[match.start():match.end()], kind="alias",
                                   basis="observation", rule="explicit-alias")
                 aliases[name].append(NameVariant(name=alias, evidence=(e,)))
         for match in REFLEXIVE.finditer(surface):
             name = " ".join(match["name"].split())
-            if name in known:
+            if name in known and REFLEXIVE.fullmatch(blocks[index].text[match.start():match.end()]):
                 e = PriorEvidence(block=index, start=match.start(), end=match.end(),
                                   excerpt=blocks[index].text[match.start():match.end()], kind="pronoun",
                                   basis="inference", rule="subject-reflexive")
@@ -612,7 +705,9 @@ def discover_characters(blocks):
 
 def preflight_document(path: str | Path):
     document, blocks, warnings = ingest_document(path)
-    return BookPreflight(schema_version=1, document=document, blocks=blocks, characters=discover_characters(blocks),
+    observations, candidates = collect_observations(blocks)
+    return BookPreflight(schema_version=2, discovery_version="deterministic-en-2", document=document, blocks=blocks,
+                         observations=observations, candidates=candidates, characters=discover_characters(blocks),
                          warnings=(*warnings, "Character discovery is incomplete; absence is not proof of non-character status"))
 
 

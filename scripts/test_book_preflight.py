@@ -159,7 +159,7 @@ class PreflightTests(unittest.TestCase):
     def test_invalid_artifact_versions_spans_identities_and_traits_rejected(self):
         base = json.loads(self.artifact('Mara said, "Wait."\n\nMara introduced herself.').to_json())
         mutations = [
-            lambda d: d.update(schema_version=2),
+            lambda d: d.update(schema_version=99),
             lambda d: d.update(schema_version=True),
             lambda d: d.pop("schema_version"),
             lambda d: d.update(extra=True),
@@ -345,7 +345,7 @@ class PreflightTests(unittest.TestCase):
             state = server.LITERARY_STATES["pocketbook"]
             prior = server.ACTIVE_BOOK_PRIOR
             invalid = json.loads(artifact.to_json())
-            invalid["schema_version"] = 2
+            invalid["schema_version"] = 99
             self.assertEqual(422, manager.post("/book/prior", json=invalid).status_code)
             self.assertIs(prior, server.ACTIVE_BOOK_PRIOR)
             self.assertIs(state, server.LITERARY_STATES["pocketbook"])
@@ -368,6 +368,161 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(state.scene.quote_open)
             self.assertIsNone(state.scene.pov_entity_id)
             self.assertIs(other_state, server.LITERARY_STATES["other"])
+
+    def test_observation_validation_and_candidate_references_are_strict(self):
+        artifact = self.artifact('Mara said, "Wait." Mara introduced herself.')
+        base = json.loads(artifact.to_json())
+        mutations = [
+            lambda d: d.update(discovery_version="deterministic-en-1"),
+            lambda d: d.pop("discovery_version"),
+            lambda d: d.pop("candidates"),
+            lambda d: d.pop("observations"),
+            lambda d: d["observations"][0].update(observation_id="o99"),
+            lambda d: d["observations"][0].update(basis="inference"),
+            lambda d: d["observations"][0].update(normalized_form="Elias"),
+            lambda d: d["observations"][0].update(in_dialogue=True),
+            lambda d: d["observations"][0]["source"].update(locator="foreign"),
+            lambda d: d["observations"][0]["source"].update(end=9999),
+            lambda d: d["observations"][0]["source"].update(excerpt="invented"),
+            lambda d: d["candidates"][0].update(occurrences=["o999999"]),
+            lambda d: d["candidates"][0].update(occurrences=["o1"]),
+            lambda d: d["candidates"][0].update(surface="When Laurie"),
+            lambda d: d["candidates"][0].update(status="resolved"),
+            lambda d: d.update(candidates=[]),
+            lambda d: d["observations"].append(d["observations"][0]),
+        ]
+        for index, mutate in enumerate(mutations):
+            value = json.loads(json.dumps(base))
+            mutate(value)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                BookPreflight.from_json(json.dumps(value))
+        self.assertEqual(artifact, BookPreflight.from_json(artifact.to_json()))
+
+    def test_clean_subjects_possessives_and_ambiguous_name_phrases(self):
+        artifact = self.artifact('When Laurie said hello. Presently Jo said hello. Tell Beth Frank asked for her. Neither said a word. Laurie’s eyes smiled. Laurie’s coat was wet. Laurie’s English friends arrived. Mary Jane asked about O’Connor. O’Connor nodded.')
+        names = {c.identity for c in artifact.characters}
+        candidates = {c.surface for c in artifact.candidates}
+        for malformed in ("When Laurie", "Presently Jo", "Tell Beth Frank", "Laurie’s", "Laurie English", "Neither"):
+            self.assertNotIn(malformed, names | candidates)
+        self.assertTrue({"Laurie", "Jo", "Frank", "Mary Jane"} <= names)
+        self.assertTrue({"Beth", "Frank", "Laurie", "O’Connor"} <= candidates)
+        source_forms = [o.source.excerpt for o in artifact.observations if o.normalized_form == "Laurie"]
+        self.assertIn("Laurie’s", source_forms)
+
+    def test_no_name_or_reference_anchor_bridges_a_quotation(self):
+        artifact = self.artifact('Mara "Elias is here" said nothing.\n\nI "Come home" said no more.')
+        self.assertEqual((), artifact.characters)
+        self.assertFalse(any(o.kind == "speech-attribution" for o in artifact.observations))
+
+    def test_candidate_evidence_never_validates_a_runtime_character(self):
+        artifact = self.artifact('Fortunato walked beside me. He wore a cloak.')
+        self.assertTrue(any(c.surface == "Fortunato" for c in artifact.candidates))
+        self.assertIsNone(artifact.find_character("Fortunato"))
+        state = self.attach(artifact)
+        before = state.book_prior.to_json()
+        self.assertIsNone(self.process("Fortunato crouched.").narrative_actor)
+        self.assertEqual({}, state.performance.voices)
+        self.assertEqual(before, state.book_prior.to_json())
+
+    def test_gutenberg_markers_are_source_aware_and_preserve_metadata_and_locators(self):
+        artifact = self.artifact('Publisher One said hello.\n\n*** START OF THE PROJECT GUTENBERG EBOOK A TEST ***\n\nMara said, "Project Gutenberg published my diary."\n\n*** END OF THE PROJECT GUTENBERG EBOOK A TEST ***\n\nPublisher Two said goodbye.')
+        self.assertEqual(["txt:3"], [b.locator for b in artifact.blocks])
+        self.assertEqual(["Mara"], [c.identity for c in artifact.characters])
+        self.assertIn("Project Gutenberg", artifact.blocks[0].text)
+        self.assertEqual("book.txt", artifact.document.filename)
+        self.assertTrue(any("Excluded 4" in w for w in artifact.warnings))
+        unmarked = self.artifact('A story about Project Gutenberg.\n\nMara said, "Hello."')
+        self.assertEqual(2, len(unmarked.blocks))
+
+    def test_schema_one_attachment_is_rejected_without_changing_active_prior(self):
+        legacy_path = Path(__file__).resolve().parents[1] / "fixtures/preflight/topology-smoke.preflight.json"
+        legacy = legacy_path.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "regenerate"):
+            BookPreflight.from_json(legacy)
+        current = self.artifact()
+        with TestClient(server.app) as manager:
+            self.assertEqual(200, manager.post("/book/prior", json=json.loads(current.to_json())).status_code)
+            prior = server.ACTIVE_BOOK_PRIOR
+            self.process('"Hi," Mara said.', "pocketbook")
+            state = server.LITERARY_STATES["pocketbook"]
+            self.assertEqual(422, manager.post("/book/prior", json=json.loads(legacy)).status_code)
+            self.assertIs(prior, server.ACTIVE_BOOK_PRIOR)
+            self.assertIs(state, server.LITERARY_STATES["pocketbook"])
+
+
+class CorpusEvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1] / "fixtures/preflight"
+        # Evaluation ground truth is never an input to preflight.
+        cls.poe = preflight_document(cls.root / "poe-edgar-allen-the-cask-of-amontillado.epub")
+        cls.little_women = preflight_document(cls.root / "alcot-louisa-may-little-women.epub")
+        cls.bellweather = preflight_document(cls.root / "bellweather.md")
+
+    def test_poe_retains_fortunato_mentions_dialogue_and_unbound_pronouns(self):
+        artifact = self.poe
+        candidate = next(c for c in artifact.candidates if c.surface == "Fortunato")
+        self.assertEqual(("inference", "unassessed", 14), (candidate.basis, candidate.status, len(candidate.occurrences)))
+        self.assertEqual((), artifact.characters)
+        observations = {o.observation_id: o for o in artifact.observations}
+        first = observations[candidate.occurrences[0]]
+        self.assertEqual((25, 34, "Fortunato"), (first.source.start, first.source.end, first.source.excerpt))
+        self.assertTrue(first.source.locator.endswith("1063-h-0.htm.xhtml:14"))
+        self.assertTrue(any(observations[ref].in_dialogue for ref in candidate.occurrences))
+        packet = artifact.candidate_packet("Fortunato")
+        nearby = packet["occurrences"][0]["nearby_observations"]
+        self.assertTrue({"I", "he"} <= {o["source"]["excerpt"] for o in nearby if o["kind"] == "pronoun-mention"})
+        self.assertTrue(any(o.rule == "reference-speech" and o.source.excerpt == "said he" for o in artifact.observations))
+
+    def test_little_women_malformed_forms_are_absent_but_clean_evidence_remains(self):
+        artifact = self.little_women
+        names = {c.surface for c in artifact.candidates} | {c.identity for c in artifact.characters}
+        self.assertFalse({"When Laurie", "Presently Jo", "Tell Beth Frank", "Laurie’s", "Neither"} & names)
+        for anchor in ("Laurie said", "Jo said", "Frank asked"):
+            self.assertTrue(any(o.kind == "speech-attribution" and o.source.excerpt == anchor for o in artifact.observations))
+        self.assertTrue(any(o.source.excerpt == "Laurie’s" and o.normalized_form == "Laurie" for o in artifact.observations))
+        self.assertTrue({"Laurie", "Jo", "Frank", "Beth", "Meg", "Amy"} <= names)
+
+    def test_bellweather_preserves_secondary_and_narrator_evidence_without_promotion(self):
+        artifact = self.bellweather
+        names = {c.surface for c in artifact.candidates}
+        self.assertTrue({"Jonah", "Jonah Hart", "Lillian", "Eleanor Bell", "Samuel Ward", "Silas Bell"} <= names)
+        self.assertEqual({"Mara", "Daniel", "Evelyn", "Rose", "Tomas"}, {c.identity for c in artifact.characters})
+        self.assertIsNone(artifact.find_character("Jonah Hart"))
+        self.assertTrue(any(o.kind == "pronoun-mention" and o.source.excerpt == "I" and not o.in_dialogue for o in artifact.observations))
+
+    def test_corpus_boilerplate_removal_retains_work_and_metadata(self):
+        for artifact, title, author, removed, block_count in (
+                (self.poe, "The Cask of Amontillado", "Edgar Allan Poe", 63, 92),
+                (self.little_women, "Little Women", "Louisa May Alcott", 60, 4171)):
+            with self.subTest(title=title):
+                self.assertEqual(title, artifact.document.title)
+                self.assertEqual((author,), artifact.document.authors)
+                self.assertEqual(block_count, len(artifact.blocks))
+                self.assertTrue(any(f"Excluded {removed} " in w for w in artifact.warnings))
+                self.assertFalse(any("THE FULL PROJECT GUTENBERG" in b.text or "*** START OF THE PROJECT GUTENBERG" in b.text for b in artifact.blocks))
+                self.assertFalse(any(c.surface == "Gutenberg" for c in artifact.candidates))
+        self.assertIn("In pace requiescat", self.poe.blocks[-1].text)
+        self.assertIn("my girls", self.little_women.blocks[-1].text.lower())
+
+    def test_full_artifact_roundtrip_and_bounded_model_ready_packet(self):
+        for artifact, surface in ((self.poe, "Fortunato"), (self.little_women, "Laurie")):
+            with self.subTest(surface=surface):
+                restored = BookPreflight.from_json(artifact.to_json())
+                self.assertEqual(artifact, restored)
+                packet = restored.candidate_packet(surface, max_occurrences=2, max_nearby=3, context_chars=80)
+                self.assertEqual(2, len(packet["occurrences"]))
+                for occurrence in packet["occurrences"]:
+                    self.assertLessEqual(len(occurrence["nearby_observations"]), 3)
+                    self.assertLessEqual(len(occurrence["context"]["excerpt"]), 160 + len(occurrence["occurrence"]["source"]["excerpt"]))
+                    for cue in occurrence["nearby_observations"]:
+                        self.assertGreaterEqual(cue["source"]["start"], occurrence["context"]["start"])
+                        self.assertLessEqual(cue["source"]["end"], occurrence["context"]["end"])
+                for kwargs in ({"max_occurrences": 9}, {"max_nearby": 0}, {"context_chars": True}):
+                    with self.assertRaises(ValueError):
+                        restored.candidate_packet(surface, **kwargs)
+        with self.assertRaises(ValueError):
+            self.poe.candidate_packet("Nobody")
 
 
 if __name__ == "__main__":
