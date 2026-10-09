@@ -604,10 +604,102 @@ def quote_surfaces(blocks):
     return result
 
 
+def lexical_name_spans(blocks, surfaces):
+    """Use source casing as lexical evidence, not as a personhood decision.
+
+    Lowercase usage makes a sentence-initial word ambiguous. Independent
+    non-initial capitalization (or an existing named cue) keeps that ambiguity
+    available; otherwise it is a boundary, not part of a name phrase.
+    """
+    words = re.compile(r"\b[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’-][A-Za-zÀ-ÖØ-öø-ÿ]+)*\b")
+    # Closed-class auxiliaries need no corpus repetition to recognize their
+    # grammatical reading. Ambiguous name uses (e.g. May) can corroborate it.
+    lowercase = set("be am is are was were been being have has had do does did can could may might must shall should will would ought".split())
+    supported = set()
+
+    def key(raw):
+        return re.sub(r"['’]s$", "", raw).casefold()
+
+    def initial(text, start):
+        prefix = text[:start].rstrip()
+        previous = list(words.finditer(prefix))
+        return (not prefix or prefix[-1] in '.!?:\n“”"('
+                or not previous or not previous[-1][0].islower())
+
+    def contraction(raw):
+        # Pronoun/auxiliary contractions are grammatical tokens; apostrophes
+        # inside names and source possessives remain available.
+        parts = re.split("['’]", raw.casefold())
+        return len(parts) == 2 and (PRONOUN_TOKEN.fullmatch(parts[0]) and
+            parts[1] in {"m", "re", "ve", "ll", "d"} or parts[1] == "t" and parts[0].endswith("n"))
+
+    for block, (outside, _) in zip(blocks, surfaces):
+        if block.kind == "heading":
+            continue
+        lowercase.update(key(m[0]) for m in words.finditer(block.text) if m[0].islower())
+        for name, *_ in named_cues(outside):
+            supported.update(key(part) for part in name.split())
+        for run in NAME_RUN.finditer(block.text):
+            tokens = list(NAME_TOKEN.finditer(run[0]))
+            # All-caps contents/headline text supplies no independent casing
+            # evidence, and grammatical prefixes cannot corroborate a phrase.
+            if (not initial(block.text, run.start()) and not run[0].isupper()
+                    and not any(key(t[0]) in NON_NAME_KEYS or contraction(t[0]) for t in tokens)):
+                supported.update(key(t[0]) for t in tokens)
+            if len(tokens) > 1 and not tokens[-1][0].isupper():
+                supported.add(key(tokens[-1][0]))
+
+    result = []
+    for block, (outside, _) in zip(blocks, surfaces):
+        spans = set()
+        if block.kind != "heading":
+            def plausible(raw):
+                value = key(raw)
+                return (value not in NON_NAME_KEYS and not PRONOUN_TOKEN.fullmatch(value) and not contraction(raw)
+                        and (value not in lowercase or value in supported)
+                        and (not raw.isupper() or value in supported))
+
+            for token in NAME_TOKEN.finditer(block.text):
+                if plausible(token[0]):
+                    spans.add((token.start(), token.end(), token[0]))
+            # Split at lexical boundaries, never join across punctuation or
+            # newlines, and never manufacture compounds out of all-caps prose.
+            cue_starts = {start for _, start, _, _, _ in named_cues(outside)}
+            for run in NAME_RUN.finditer(block.text):
+                group = []
+
+                def retain_group():
+                    if len(group) > 1:
+                        start, end = run.start() + group[0].start(), run.start() + group[-1].end()
+                        spans.add((start, end, block.text[start:end]))
+
+                for token in NAME_TOKEN.finditer(run[0]):
+                    if group and ('\n' in run[0][group[-1].end():token.start()]
+                                  or run.start() + token.start() in cue_starts):
+                        retain_group()
+                        group = []
+                    if not plausible(token[0]) or token[0].isupper() or re.search(r"['’]s$", token[0]):
+                        retain_group()
+                        group = []
+                        continue
+                    group.append(token)
+                retain_group()
+            # Preserve the exact lexical hypotheses required by unchanged
+            # deterministic promotion anchors, including ambiguous name words.
+            for name, start, end, _, _ in named_cues(outside):
+                for match in NAME_RUN.finditer(block.text, start, end):
+                    if clean_name(match[0]) == name:
+                        spans.add((match.start(), match.end(), match[0]))
+        result.append(sorted(spans))
+    return result
+
+
 def collect_observations(blocks):
     """Lexical/source observations only; name shape does not prove personhood."""
     records = []
-    for index, (block, (outside, mask)) in enumerate(zip(blocks, quote_surfaces(blocks))):
+    surfaces = quote_surfaces(blocks)
+    names = lexical_name_spans(blocks, surfaces)
+    for index, (block, (outside, mask)) in enumerate(zip(blocks, surfaces)):
         if block.kind == "heading":
             continue
 
@@ -616,12 +708,7 @@ def collect_observations(blocks):
                 source=SourceSpan(block=index, locator=block.locator, start=start, end=end,
                                   excerpt=block.text[start:end]), in_dialogue=all(mask[start:end])))
 
-        # Preserve individual names even in a capitalized phrase we cannot parse.
-        # Only retain a compound surface when no discourse/grammatical token was swallowed.
-        matches = [(m.start(), m.end(), m[0]) for m in NAME_TOKEN.finditer(block.text)]
-        matches.extend((m.start(), m.end(), m[0]) for m in NAME_RUN.finditer(block.text)
-                       if len(m[0].split()) > 1 and not any(p.casefold() in NON_NAME_KEYS for p in m[0].split()))
-        for start, end, raw in matches:
+        for start, end, raw in names[index]:
             name = clean_name(raw)
             if name and not any(p.casefold() in NON_NAME_KEYS for p in raw.split()):
                 add(start, end, "name-mention", "capitalized-surface", name)

@@ -414,6 +414,39 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual((), artifact.characters)
         self.assertFalse(any(o.kind == "speech-attribution" for o in artifact.observations))
 
+    def test_lexical_boundaries_use_source_casing_without_losing_embedded_names(self):
+        artifact = self.artifact('We spoke about Mira and could call her here. A poor singer was dearest to me.\n\nAbout Mira. Call Mira. Here Mira waited. Poor Mira. My Dearest Celia.\n\nMira visited Celia. I’m ready. Do it. O’Connor arrived. Mira’s coat dried.')
+        names = {c.surface for c in artifact.candidates}
+        self.assertFalse({"About", "Call", "Here", "Poor", "Dearest", "My", "Do", "I’m",
+                          "About Mira", "Call Mira", "Here Mira", "Poor Mira", "My Dearest Celia"} & names)
+        self.assertTrue({"Mira", "Celia", "O’Connor"} <= names)
+        # Every embedded name keeps its own exact source span, even when the
+        # surrounding capitalized phrase is rejected as a lexical hypothesis.
+        for phrase, name in (("About Mira", "Mira"), ("Call Mira", "Mira"),
+                             ("Here Mira", "Mira"), ("Poor Mira", "Mira"),
+                             ("My Dearest Celia", "Celia")):
+            block = next(i for i, b in enumerate(artifact.blocks) if phrase in b.text)
+            start = artifact.blocks[block].text.index(phrase) + phrase.index(name)
+            self.assertTrue(any(o.kind == "name-mention" and o.normalized_form == name
+                                and (o.source.block, o.source.start, o.source.end) == (block, start, start + len(name))
+                                for o in artifact.observations))
+        self.assertTrue(any(o.source.excerpt == "Mira’s" and o.normalized_form == "Mira"
+                            for o in artifact.observations))
+
+    def test_lexical_boundaries_preserve_ambiguous_names_and_multiword_spans(self):
+        artifact = self.artifact('We may march with grace and hope.\n\nMay said hello. March asked why. Grace replied quietly. Hope smiled.\n\nI met Mary Jane and Hope today. Mary Jane left. Newcomer waited.')
+        names = {c.surface for c in artifact.candidates}
+        self.assertTrue({"May", "March", "Grace", "Hope", "Mary", "Jane", "Mary Jane", "Newcomer"} <= names)
+        self.assertEqual({"May", "March", "Grace"}, {c.identity for c in artifact.characters})
+        self.assertIsNone(artifact.find_character("Hope"))
+
+    def test_lexical_boundaries_do_not_join_headings_newlines_or_cue_subjects(self):
+        artifact = self.artifact('# Mary Jane\n\nCHAPTER NINE MIRA GOES HOME\n\nMira waited.\n\nCelia\nMira arrived.\n\nTell Beth Frank asked for her.', name="book.md")
+        names = {c.surface for c in artifact.candidates}
+        self.assertFalse({"Mary Jane", "NINE MIRA GOES", "GOES", "Celia Mira", "Beth Frank", "Tell Beth Frank"} & names)
+        self.assertTrue({"Mira", "Celia", "Beth", "Frank"} <= names)
+        self.assertEqual({"Frank"}, {c.identity for c in artifact.characters})
+
     def test_candidate_evidence_never_validates_a_runtime_character(self):
         artifact = self.artifact('Fortunato walked beside me. He wore a cloak.')
         self.assertTrue(any(c.surface == "Fortunato" for c in artifact.candidates))
@@ -477,11 +510,21 @@ class CorpusEvidenceTests(unittest.TestCase):
     def test_little_women_malformed_forms_are_absent_but_clean_evidence_remains(self):
         artifact = self.little_women
         names = {c.surface for c in artifact.candidates} | {c.identity for c in artifact.characters}
-        self.assertFalse({"When Laurie", "Presently Jo", "Tell Beth Frank", "Laurie’s", "Neither"} & names)
+        self.assertFalse({"When Laurie", "Presently Jo", "Tell Beth Frank", "Laurie’s", "Neither",
+                          "About Meg", "Call Meg", "Here Meg", "Poor Meg", "My Dearest Margaret",
+                          "NINE MEG GOES", "I’m", "Do"} & names)
         for anchor in ("Laurie said", "Jo said", "Frank asked"):
             self.assertTrue(any(o.kind == "speech-attribution" and o.source.excerpt == anchor for o in artifact.observations))
         self.assertTrue(any(o.source.excerpt == "Laurie’s" and o.normalized_form == "Laurie" for o in artifact.observations))
         self.assertTrue({"Laurie", "Jo", "Frank", "Beth", "Meg", "Amy"} <= names)
+        occurrences = {c.surface: len(c.occurrences) for c in artifact.candidates}
+        for name, count in (("Meg", 683), ("Margaret", 22), ("Laurie", 596), ("Jo", 1355),
+                            ("Frank", 18), ("Amy", 645), ("Beth", 459)):
+            self.assertEqual(count, occurrences[name], name)
+        self.assertEqual({"Amy", "Annie", "Aunt March", "Belle", "Beth", "Clara", "Demi", "Esther",
+                          "Father", "Frank", "Fred", "Grace", "Hannah", "Jo", "John", "Kate", "Kirke",
+                          "Laurie", "Major Lincoln", "Mamma", "March", "Margaret", "May", "Meg", "Minnie",
+                          "Nan", "Ned", "Sallie", "Tudor", "Zara"}, {c.identity for c in artifact.characters})
 
     def test_bellweather_preserves_secondary_and_narrator_evidence_without_promotion(self):
         artifact = self.bellweather
@@ -489,6 +532,10 @@ class CorpusEvidenceTests(unittest.TestCase):
         self.assertTrue({"Jonah", "Jonah Hart", "Lillian", "Eleanor Bell", "Samuel Ward", "Silas Bell"} <= names)
         self.assertEqual({"Mara", "Daniel", "Evelyn", "Rose", "Tomas"}, {c.identity for c in artifact.characters})
         self.assertIsNone(artifact.find_character("Jonah Hart"))
+        self.assertFalse({"I’m", "Do"} & names)
+        occurrences = {c.surface: len(c.occurrences) for c in artifact.candidates}
+        for name, count in (("Jonah Hart", 2), ("Eleanor Bell", 7), ("Samuel Ward", 4), ("Silas Bell", 1)):
+            self.assertEqual(count, occurrences[name], name)
         self.assertTrue(any(o.kind == "pronoun-mention" and o.source.excerpt == "I" and not o.in_dialogue for o in artifact.observations))
 
     def test_corpus_boilerplate_removal_retains_work_and_metadata(self):
