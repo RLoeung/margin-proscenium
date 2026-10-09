@@ -359,6 +359,18 @@ class BookPreflight(PriorModel):
     def to_json(self):
         return self.model_dump_json(indent=2)
 
+    def retrieve_evidence(self, kind, surfaces=(), **bounds):
+        """Retrieve bounded source passages without making literary judgments.
+
+        See evidence_retrieval.retrieve_evidence for query and selection rules.
+        This view is separate from the serialized artifact schema.
+        """
+        if __package__:
+            from .evidence_retrieval import retrieve_evidence
+        else:
+            from evidence_retrieval import retrieve_evidence
+        return retrieve_evidence(self, kind, surfaces, **bounds)
+
     def candidate_packet(self, surface: str, *, max_occurrences=4, max_nearby=8, context_chars=160):
         """Build bounded source evidence for later reasoning; perform no inference.
 

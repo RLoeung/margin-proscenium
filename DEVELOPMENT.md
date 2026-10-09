@@ -104,6 +104,8 @@ Preflight now emits schema `2` / discovery `deterministic-en-2`. Separate `obser
 
 Validation on 2026-10-06 used the bundled CPython 3.12.14 with `.venv/Lib/site-packages` on `PYTHONPATH`, because the preserved virtual environment's base Python executable was missing. The environment was not rebuilt. PDF tests used the bundled pypdf installation; fresh installation of the optional dependency in the preserved environment remains unverified.
 
+`artifact.retrieve_evidence(kind, surfaces=(), **bounds)` provides read-only source retrieval for `candidate` (one spelling), `relationship` (two to four spellings), and `narrator` (optional spellings) queries. Results include ranked anchor blocks, adjacent source slices, locators, observation references, score components, and explicit empty/clipping metadata. Relationship searches include labeled literal trailing-s spellings; they do not reconcile identities or filter conflicting evidence. Defaults cap output at eight passages, two adjacent blocks on each side, 1,200 characters and 64 observation references per block. Run its focused suite with `python -B -m unittest discover -s scripts -p test_evidence_retrieval.py -v`. This retrieval view does not change the artifact schema or runtime routing.
+
 ## Development workflow
 
 Before changing Proscenium, read the current README, Architecture, and Roadmap, inspect the code involved, and check Git status. The repository is intended to carry enough architectural memory that a new Codex task should be able to recover the project from the repository rather than requiring a giant prompt that retells its history.
